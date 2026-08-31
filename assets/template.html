@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<!-- explain skill document. The agent replaces {{TITLE}} {{LANG}} {{SLUG}} {{CONTENT}}
+     and writes the result to .explain/<slug>/index.html. Everything the agent
+     authors goes inside <main id="explain-content">; the comment layer anchors
+     selections against that container's text. -->
+<html lang="{{LANG}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/assets/explain.css">
+<script>window.EXPLAIN = {slug: "{{SLUG}}", lang: "{{LANG}}"};</script>
+<script defer src="/assets/explain.js"></script>
+</head>
+<body>
+<div class="ex-layout">
+<main id="explain-content">
+{{CONTENT}}
+</main>
+<aside id="ex-sidebar"></aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,720 @@
+/* explain skill — comment layer.
+ *
+ * Anchors: {exact, prefix, suffix} captured from the reader's selection and
+ * re-located against #explain-content's concatenated text on every load, so
+ * regenerated documents keep their comments (unlocatable ones show as
+ * orphaned in the sidebar). Highlight rendering uses the CSS Custom
+ * Highlight API when available; without it the sidebar still works.
+ *
+ * All writes go through the local server's JSON API; the page polls
+ * /state every 2.5s and refetches comments when the rev moves.
+ */
+(() => {
+  'use strict';
+
+  const CFG = window.EXPLAIN || { slug: '', lang: 'en' };
+
+  const STRINGS = {
+    en: {
+      comments: 'Comments',
+      addComment: 'Comment',
+      placeholder: 'Leave a comment on the selected text…',
+      replyPlaceholder: 'Reply…',
+      send: 'Send',
+      cancel: 'Cancel',
+      reply: 'Reply',
+      resolve: 'Resolve',
+      reopen: 'Reopen',
+      edit: 'Edit',
+      delete: 'Delete',
+      save: 'Save',
+      you: 'You',
+      agent: 'Agent',
+      edited: 'edited',
+      resolved: 'Resolved',
+      unread: 'Waiting for agent',
+      newReply: 'New reply',
+      orphaned: 'Lost anchor',
+      empty: 'Select some text in the document to leave a comment.',
+      watching: 'An agent session is watching this document.',
+      notWatching: 'No agent is watching right now — comments will be answered when a session resumes.',
+      docUpdated: 'This document was updated.',
+      refresh: 'Reload',
+      disconnected: 'Server unreachable — it may have shut down. Comments are read-only until a session restarts it.',
+      confirmDelete: 'Delete this?',
+      resolvedGroup: 'Resolved',
+      expandAll: 'Expand all',
+      tabView: 'Tabs',
+      generatedFrom: 'Generated from',
+      goToAnchor: 'Go to text',
+    },
+    ko: {
+      comments: '댓글',
+      addComment: '댓글',
+      placeholder: '선택한 부분에 댓글을 남겨보세요…',
+      replyPlaceholder: '답글…',
+      send: '등록',
+      cancel: '취소',
+      reply: '답글',
+      resolve: '해결됨으로 표시',
+      reopen: '다시 열기',
+      edit: '수정',
+      delete: '삭제',
+      save: '저장',
+      you: '나',
+      agent: '에이전트',
+      edited: '수정됨',
+      resolved: '해결됨',
+      unread: '에이전트 응답 대기',
+      newReply: '새 답글',
+      orphaned: '위치 잃음',
+      empty: '문서에서 텍스트를 드래그하면 댓글을 남길 수 있습니다.',
+      watching: '에이전트 세션이 이 문서를 감시하고 있습니다.',
+      notWatching: '지금은 감시 중인 에이전트가 없습니다 — 다음 세션이 이어받을 때 답변됩니다.',
+      docUpdated: '문서가 갱신되었습니다.',
+      refresh: '새로고침',
+      disconnected: '서버에 연결할 수 없습니다 — 종료된 것 같습니다. 세션이 재시작할 때까지 읽기 전용입니다.',
+      confirmDelete: '삭제할까요?',
+      resolvedGroup: '해결됨',
+      expandAll: '모두 펼치기',
+      tabView: '탭 보기',
+      generatedFrom: '생성 기준',
+      goToAnchor: '위치로 이동',
+    },
+  };
+  const S = STRINGS[CFG.lang] || STRINGS.en;
+  const CTX_LEN = 48;
+  const API = `/api/docs/${encodeURIComponent(CFG.slug)}`;
+
+  let content, sidebar, toggleBtn;
+  let data = { rev: -1, threads: [] };
+  let idx = null;                 // {text, nodes:[{node,start}], nodeMap}
+  let views = new Map();          // viewId -> {el, title, parent}
+  let activeView = null;
+  let crumbs = null;
+  let ranges = new Map();         // threadId -> Range|null
+  let openId = null;              // expanded thread
+  let editingId = null;           // message id being edited
+  let initialEtag = null;
+  let watched = null;
+  let docMeta = null;
+  let disconnected = false;
+  let docUpdated = false;
+  let renderPending = false;
+
+  // ---------- API ----------
+
+  async function req(method, path, body) {
+    const res = await fetch(API + path, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) throw new Error(`${method} ${path}: ${res.status}`);
+    return res.json();
+  }
+
+  async function refresh() {
+    data = await req('GET', '/comments');
+    relocate();
+    render();
+  }
+
+  // ---------- drill-down views ----------
+
+  function setupViews() {
+    const els = content.querySelectorAll('[data-view]');
+    if (!els.length) return;
+    for (const el of els) {
+      const id = el.dataset.view;
+      const heading = el.querySelector('h1,h2,h3');
+      views.set(id, {
+        el,
+        title: el.dataset.title || (heading ? heading.textContent : id),
+        parent: el.dataset.parent || null,
+      });
+    }
+    crumbs = document.createElement('nav');
+    crumbs.className = 'ex-crumbs ex-ui';
+    content.prepend(crumbs);
+    window.addEventListener('hashchange', applyHash);
+    applyHash();
+  }
+
+  function homeId() {
+    for (const [id, v] of views) if (!v.parent) return id;
+    return views.keys().next().value;
+  }
+
+  function applyHash() {
+    const m = location.hash.match(/^#\/(.+)$/);
+    if (m) {
+      const id = decodeURIComponent(m[1]);
+      if (views.has(id)) {
+        activateView(id);
+        window.scrollTo({ top: 0 });
+        return;
+      }
+    }
+    if (location.hash.length > 1) {
+      // plain in-page anchor: activate the view containing the target
+      const target = document.getElementById(location.hash.slice(1));
+      const v = target && target.closest('[data-view]');
+      if (v) {
+        activateView(v.dataset.view);
+        target.scrollIntoView();
+        return;
+      }
+      if (activeView) return; // unknown anchor — keep the current view
+    }
+    activateView(homeId());
+  }
+
+  function activateView(id) {
+    if (!views.size || !views.has(id)) return;
+    activeView = id;
+    for (const [vid, v] of views) v.el.classList.toggle('ex-view-active', vid === id);
+    const trail = [];
+    for (let cur = id; cur; cur = (views.get(cur) || {}).parent) trail.unshift(cur);
+    if (trail[0] !== homeId()) trail.unshift(homeId());
+    crumbs.innerHTML = trail
+      .map((vid, i) =>
+        i === trail.length - 1
+          ? `<span class="ex-crumb-here">${esc(views.get(vid).title)}</span>`
+          : `<a href="#/${encodeURIComponent(vid)}">${esc(views.get(vid).title)}</a>`
+      )
+      .join('<span class="ex-crumb-sep">›</span>');
+    paintHighlights();
+  }
+
+  // ---------- data-example stepper (.ex-steps) ----------
+
+  function setupSteps() {
+    for (const box of content.querySelectorAll('.ex-steps')) {
+      const steps = Array.from(box.querySelectorAll(':scope > .ex-step'));
+      if (steps.length < 2) continue;
+      box._steps = steps;
+      const bar = document.createElement('div');
+      bar.className = 'ex-steps-bar ex-ui';
+      steps.forEach((s, i) => {
+        const b = document.createElement('button');
+        b.className = 'ex-step-tab';
+        b.textContent = s.dataset.label || String(i + 1);
+        b.addEventListener('click', () => activateStep(s));
+        bar.appendChild(b);
+      });
+      const tog = document.createElement('button');
+      tog.className = 'ex-step-tab ex-steps-toggle';
+      tog.textContent = S.expandAll;
+      tog.addEventListener('click', () => {
+        const on = box.classList.toggle('ex-steps-expanded');
+        tog.textContent = on ? S.tabView : S.expandAll;
+      });
+      bar.appendChild(tog);
+      box.prepend(bar);
+      activateStep(steps[0]);
+    }
+  }
+
+  function activateStep(step) {
+    const box = step.closest('.ex-steps');
+    if (!box || !box._steps) return;
+    const tabs = box.querySelectorAll(':scope > .ex-steps-bar > .ex-step-tab');
+    box._steps.forEach((s, i) => {
+      s.classList.toggle('ex-step-active', s === step);
+      if (tabs[i]) tabs[i].classList.toggle('ex-step-tab-active', s === step);
+    });
+  }
+
+  /* Make a node visible: switch to its view, open ancestor <details>,
+   * activate its step — outermost first. Used when opening a comment
+   * thread whose anchor sits inside collapsed/hidden content. */
+  function revealForNode(node) {
+    const actions = [];
+    let el = node.nodeType === 1 ? node : node.parentElement;
+    while (el && el !== content) {
+      const cur = el;
+      if (cur.tagName === 'DETAILS') actions.push(() => { cur.open = true; });
+      if (cur.classList.contains('ex-step')) actions.push(() => activateStep(cur));
+      if (cur.dataset.view) {
+        actions.push(() => {
+          if (activeView !== cur.dataset.view) {
+            history.replaceState(null, '', '#/' + encodeURIComponent(cur.dataset.view));
+            activateView(cur.dataset.view);
+          }
+        });
+      }
+      el = el.parentElement;
+    }
+    actions.reverse().forEach((f) => f());
+  }
+
+  // ---------- text index + anchoring ----------
+
+  // JS-injected chrome (breadcrumbs, stepper tabs) must not pollute the
+  // anchor text index, so both the index and offsetOf skip .ex-ui subtrees.
+  function indexable(textNode) {
+    const p = textNode.parentElement;
+    return !p || !p.closest('.ex-ui');
+  }
+
+  function buildIndex() {
+    const nodes = [];
+    const nodeMap = new Map();
+    let text = '';
+    const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (indexable(n) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT),
+    });
+    let n;
+    while ((n = walker.nextNode())) {
+      nodes.push({ node: n, start: text.length });
+      nodeMap.set(n, text.length);
+      text += n.nodeValue;
+    }
+    idx = { text, nodes, nodeMap };
+  }
+
+  function offsetOf(node, off) {
+    if (node.nodeType === 3 && idx.nodeMap.has(node)) return idx.nodeMap.get(node) + off;
+    // element boundary: first indexed text node at/after it
+    const r = document.createRange();
+    r.setStart(node, off);
+    r.collapse(true);
+    for (const e of idx.nodes) {
+      try {
+        if (r.comparePoint(e.node, 0) >= 0) return e.start;
+      } catch { /* incomparable node */ }
+    }
+    return idx.text.length;
+  }
+
+  function posToNode(pos) {
+    const ns = idx.nodes;
+    let lo = 0, hi = ns.length - 1, ans = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (ns[mid].start <= pos) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    const e = ns[ans];
+    return { node: e.node, offset: Math.min(pos - e.start, e.node.nodeValue.length) };
+  }
+
+  function rangeFromOffsets(start, end) {
+    const r = document.createRange();
+    const s = posToNode(start), e = posToNode(end);
+    r.setStart(s.node, s.offset);
+    r.setEnd(e.node, e.offset);
+    return r;
+  }
+
+  function captureAnchor(range) {
+    const start = offsetOf(range.startContainer, range.startOffset);
+    const end = offsetOf(range.endContainer, range.endOffset);
+    if (end <= start) return null;
+    return {
+      exact: idx.text.slice(start, end),
+      prefix: idx.text.slice(Math.max(0, start - CTX_LEN), start),
+      suffix: idx.text.slice(end, end + CTX_LEN),
+    };
+  }
+
+  function commonSuffixLen(a, b) {
+    let i = 0;
+    while (i < a.length && i < b.length && a[a.length - 1 - i] === b[b.length - 1 - i]) i++;
+    return i;
+  }
+
+  function commonPrefixLen(a, b) {
+    let i = 0;
+    while (i < a.length && i < b.length && a[i] === b[i]) i++;
+    return i;
+  }
+
+  function locate(anchor) {
+    if (!anchor || !anchor.exact) return null;
+    let best = -1, bestScore = -1, from = 0, pos;
+    while ((pos = idx.text.indexOf(anchor.exact, from)) !== -1) {
+      let score = 0;
+      if (anchor.prefix) {
+        score += commonSuffixLen(idx.text.slice(Math.max(0, pos - CTX_LEN), pos), anchor.prefix);
+      }
+      if (anchor.suffix) {
+        const after = idx.text.slice(pos + anchor.exact.length, pos + anchor.exact.length + CTX_LEN);
+        score += commonPrefixLen(after, anchor.suffix);
+      }
+      if (score > bestScore) { bestScore = score; best = pos; }
+      from = pos + 1;
+    }
+    if (best === -1) return null;
+    try {
+      return rangeFromOffsets(best, best + anchor.exact.length);
+    } catch {
+      return null;
+    }
+  }
+
+  function relocate() {
+    buildIndex();
+    ranges = new Map();
+    for (const t of data.threads) ranges.set(t.id, locate(t.anchor));
+    paintHighlights();
+  }
+
+  // ---------- highlights ----------
+
+  function paintHighlights() {
+    if (!('highlights' in CSS)) return;
+    const normal = new Highlight();
+    const active = new Highlight();
+    for (const t of data.threads) {
+      if (t.status === 'resolved') continue;
+      const r = ranges.get(t.id);
+      if (!r) continue;
+      (t.id === openId ? active : normal).add(r);
+    }
+    CSS.highlights.set('ex-hl', normal);
+    CSS.highlights.set('ex-hl-active', active);
+  }
+
+  function caretFromPoint(x, y) {
+    if (document.caretPositionFromPoint) {
+      const p = document.caretPositionFromPoint(x, y);
+      return p ? { node: p.offsetNode, offset: p.offset } : null;
+    }
+    if (document.caretRangeFromPoint) {
+      const r = document.caretRangeFromPoint(x, y);
+      return r ? { node: r.startContainer, offset: r.startOffset } : null;
+    }
+    return null;
+  }
+
+  // ---------- selection -> fab -> popover ----------
+
+  let fab = null, popover = null, pendingAnchor = null;
+
+  function removeFloating() {
+    if (fab) { fab.remove(); fab = null; }
+    if (popover) { popover.remove(); popover = null; }
+  }
+
+  function onMouseUp(e) {
+    if (e.target.closest && (e.target.closest('#ex-sidebar') || e.target.closest('.ex-popover') || e.target.closest('.ex-fab'))) return;
+    setTimeout(() => {
+      const sel = window.getSelection();
+      if (fab) { fab.remove(); fab = null; }
+      if (popover) return;
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+      const range = sel.getRangeAt(0);
+      if (!content.contains(range.commonAncestorContainer)) return;
+      if (!range.toString().trim()) return;
+      pendingAnchor = captureAnchor(range);
+      if (!pendingAnchor) return;
+      const rect = range.getBoundingClientRect();
+      fab = document.createElement('button');
+      fab.className = 'ex-fab';
+      fab.textContent = '💬 ' + S.addComment;
+      fab.style.left = Math.min(window.scrollX + rect.right + 6, window.scrollX + window.innerWidth - 140) + 'px';
+      fab.style.top = (window.scrollY + rect.bottom + 6) + 'px';
+      fab.addEventListener('click', openPopover);
+      document.body.appendChild(fab);
+    }, 0);
+  }
+
+  function openPopover() {
+    const rect = fab.getBoundingClientRect();
+    fab.remove();
+    fab = null;
+    popover = document.createElement('div');
+    popover.className = 'ex-popover';
+    popover.innerHTML =
+      `<textarea placeholder="${esc(S.placeholder)}"></textarea>` +
+      `<div class="ex-popover-actions">` +
+      `<button class="ex-btn" data-act="cancel">${esc(S.cancel)}</button>` +
+      `<button class="ex-btn ex-btn-primary" data-act="send">${esc(S.send)}</button></div>`;
+    popover.style.left = Math.min(window.scrollX + rect.left, window.scrollX + window.innerWidth - 340) + 'px';
+    popover.style.top = (window.scrollY + rect.top) + 'px';
+    document.body.appendChild(popover);
+    const ta = popover.querySelector('textarea');
+    ta.focus();
+    popover.addEventListener('click', async (e) => {
+      const act = e.target.dataset && e.target.dataset.act;
+      if (act === 'cancel') removeFloating();
+      if (act === 'send') {
+        const body = ta.value.trim();
+        if (!body) return;
+        try {
+          const res = await req('POST', '/threads', { anchor: pendingAnchor, body });
+          openId = res.thread.id;
+          removeFloating();
+          window.getSelection().removeAllRanges();
+          await refresh();
+        } catch { /* keep the popover so the text isn't lost */ }
+      }
+    });
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) popover.querySelector('[data-act=send]').click();
+      if (e.key === 'Escape') removeFloating();
+    });
+  }
+
+  function onContentClick(e) {
+    if (e.target.closest('a, button, summary, [data-goto], .ex-ui')) return;
+    if (window.getSelection().toString()) return;
+    const pos = caretFromPoint(e.clientX, e.clientY);
+    if (!pos) return;
+    for (const t of data.threads) {
+      if (t.status === 'resolved') continue;
+      const r = ranges.get(t.id);
+      try {
+        if (r && r.isPointInRange(pos.node, pos.offset)) {
+          openThread(t.id);
+          document.body.classList.add('ex-sidebar-open');
+          return;
+        }
+      } catch { /* node not comparable */ }
+    }
+  }
+
+  // ---------- sidebar ----------
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function fmtTime(iso) {
+    try {
+      return new Date(iso).toLocaleString(CFG.lang, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return iso;
+    }
+  }
+
+  function unseenCount(t) {
+    return t.messages.filter((m) => m.author === 'agent' && !m.seen_by_user).length;
+  }
+
+  // message bodies are plain text, but #/view mentions become view links and
+  // file:line references render as code
+  function renderBody(s) {
+    let h = esc(s);
+    h = h.replace(/#\/([a-zA-Z0-9._-]+)/g, (m, id) =>
+      views.has(id) ? `<a href="#/${id}">${m}</a>` : m
+    );
+    h = h.replace(/(^|[\s(])([\w@~./-]+\.[A-Za-z]{1,4}:\d+)/g, (m, pre, ref) => `${pre}<code>${ref}</code>`);
+    return h;
+  }
+
+  function threadCard(t) {
+    const open = t.id === openId;
+    const orphan = !ranges.get(t.id);
+    const chips = [];
+    if (t.status === 'unread') chips.push(`<span class="ex-chip ex-chip-unread">${esc(S.unread)}</span>`);
+    if (unseenCount(t)) chips.push(`<span class="ex-chip ex-chip-new">${esc(S.newReply)}</span>`);
+    if (orphan) chips.push(`<span class="ex-chip ex-chip-orphan">${esc(S.orphaned)}</span>`);
+    if (t.status === 'resolved') chips.push(`<span class="ex-chip">${esc(S.resolved)}</span>`);
+
+    let inner = `<div class="ex-thread-top"><span class="ex-excerpt">“${esc(t.anchor.exact.slice(0, 90))}”</span>${chips.join('')}</div>`;
+
+    if (open) {
+      inner += t.messages.map((m) => {
+        const who = m.author === 'agent' ? `<span class="ex-msg-author ex-agent">${esc(S.agent)}</span>` : `<span class="ex-msg-author">${esc(S.you)}</span>`;
+        const edited = m.edited_at ? ` · ${esc(S.edited)}` : '';
+        const tools = m.author === 'user'
+          ? `<span class="ex-msg-tools"><button class="ex-btn-ghost" data-act="edit-msg" data-mid="${m.id}">${esc(S.edit)}</button>` +
+            `<button class="ex-btn-ghost" data-act="del-msg" data-mid="${m.id}">${esc(S.delete)}</button></span>`
+          : '';
+        const body = editingId === m.id
+          ? `<textarea data-edit="${m.id}">${esc(m.body)}</textarea>` +
+            `<div class="ex-popover-actions"><button class="ex-btn" data-act="cancel-edit">${esc(S.cancel)}</button>` +
+            `<button class="ex-btn ex-btn-primary" data-act="save-edit" data-mid="${m.id}">${esc(S.save)}</button></div>`
+          : `<div class="ex-msg-body">${renderBody(m.body)}</div>`;
+        return `<div class="ex-msg"><div class="ex-msg-head">${who}<span>${esc(fmtTime(m.created_at))}${edited}</span>${tools}</div>${body}</div>`;
+      }).join('');
+
+      inner += `<div class="ex-msg"><textarea data-reply placeholder="${esc(S.replyPlaceholder)}"></textarea></div>`;
+      const resolveBtn = t.status === 'resolved'
+        ? `<button class="ex-btn" data-act="reopen">${esc(S.reopen)}</button>`
+        : `<button class="ex-btn" data-act="resolve">${esc(S.resolve)}</button>`;
+      const gotoBtn = ranges.get(t.id)
+        ? `<button class="ex-btn" data-act="goto">${esc(S.goToAnchor)}</button>`
+        : '';
+      inner += `<div class="ex-thread-actions">${gotoBtn}${resolveBtn}` +
+        `<button class="ex-btn-ghost" data-act="del-thread">${esc(S.delete)}</button><span class="ex-spacer"></span>` +
+        `<button class="ex-btn ex-btn-primary" data-act="reply">${esc(S.reply)}</button></div>`;
+    }
+    return `<div class="ex-thread${open ? ' ex-open' : ''}" data-tid="${t.id}">${inner}</div>`;
+  }
+
+  function render() {
+    if (sidebar.contains(document.activeElement) &&
+        (document.activeElement.tagName === 'TEXTAREA' || document.activeElement.tagName === 'INPUT')) {
+      renderPending = true;
+      return;
+    }
+    renderPending = false;
+
+    const active = data.threads.filter((t) => t.status !== 'resolved');
+    const resolved = data.threads.filter((t) => t.status === 'resolved');
+    const totalUnseen = data.threads.reduce((n, t) => n + unseenCount(t), 0);
+
+    let html = `<div class="ex-side-head"><span class="ex-dot ${watched ? 'ex-dot-on' : 'ex-dot-off'}"></span><h2>${esc(S.comments)}</h2></div>`;
+    if (docMeta && (docMeta.commit || docMeta.updated_at)) {
+      const commit = docMeta.commit ? `<code>${esc(String(docMeta.commit).slice(0, 12))}</code> · ` : '';
+      html += `<div class="ex-side-meta">${esc(S.generatedFrom)} ${commit}${esc(fmtTime(docMeta.updated_at || docMeta.created_at))}</div>`;
+    }
+    if (disconnected) html += `<div class="ex-banner ex-banner-warn">${esc(S.disconnected)}</div>`;
+    if (docUpdated) html += `<div class="ex-banner ex-banner-warn">${esc(S.docUpdated)}<br><button class="ex-btn" data-act="reload-doc">${esc(S.refresh)}</button></div>`;
+    if (!disconnected) html += `<div class="ex-banner ex-banner-info">${esc(watched ? S.watching : S.notWatching)}</div>`;
+
+    if (!data.threads.length) {
+      html += `<div class="ex-empty">${esc(S.empty)}</div>`;
+    } else {
+      html += active.map(threadCard).join('');
+      if (resolved.length) {
+        html += `<details class="ex-resolved-group"${resolved.some((t) => t.id === openId) ? ' open' : ''}>` +
+          `<summary>${esc(S.resolvedGroup)} (${resolved.length})</summary>` +
+          resolved.map(threadCard).join('') + `</details>`;
+      }
+    }
+    sidebar.innerHTML = html;
+    toggleBtn.textContent = '💬' + (totalUnseen ? ` ${totalUnseen}` : '');
+    paintHighlights();
+  }
+
+  function revealAnchor(id) {
+    const r = ranges.get(id);
+    if (!r) return false;
+    revealForNode(r.startContainer);
+    const rect = r.getBoundingClientRect();
+    if (rect.top < 0 || rect.bottom > window.innerHeight) {
+      window.scrollTo({ top: window.scrollY + rect.top - window.innerHeight / 3, behavior: 'smooth' });
+    }
+    return true;
+  }
+
+  function openThread(id) {
+    openId = id;
+    editingId = null;
+    render();
+    const t = data.threads.find((x) => x.id === id);
+    revealAnchor(id);
+    if (t && unseenCount(t)) {
+      req('PATCH', `/threads/${t.id}`, { action: 'seen' }).then(refresh).catch(() => {});
+    }
+  }
+
+  async function onSidebarClick(e) {
+    const actEl = e.target.closest('[data-act]');
+    const card = e.target.closest('.ex-thread');
+    if (!actEl) {
+      // re-clicking an open thread's excerpt re-reveals its anchor (view switch + scroll)
+      if (card && (card.dataset.tid !== openId || e.target.closest('.ex-thread-top'))) {
+        openThread(card.dataset.tid);
+      }
+      return;
+    }
+    const act = actEl.dataset.act;
+    if (act === 'reload-doc') { location.reload(); return; }
+    if (!card) return;
+    const tid = card.dataset.tid;
+    try {
+      if (act === 'reply') {
+        const ta = card.querySelector('[data-reply]');
+        const body = ta && ta.value.trim();
+        if (!body) return;
+        await req('POST', `/threads/${tid}/messages`, { author: 'user', body });
+        await refresh();
+      } else if (act === 'goto') {
+        revealAnchor(tid);
+        // on narrow screens the sidebar drawer covers the content — close it
+        if (window.innerWidth <= 960) document.body.classList.remove('ex-sidebar-open');
+      } else if (act === 'resolve' || act === 'reopen') {
+        await req('PATCH', `/threads/${tid}`, { action: act });
+        if (act === 'resolve') openId = null;
+        await refresh();
+      } else if (act === 'del-thread') {
+        if (!confirm(S.confirmDelete)) return;
+        await req('DELETE', `/threads/${tid}`);
+        openId = null;
+        await refresh();
+      } else if (act === 'del-msg') {
+        if (!confirm(S.confirmDelete)) return;
+        await req('DELETE', `/threads/${tid}/messages/${actEl.dataset.mid}`);
+        await refresh();
+      } else if (act === 'edit-msg') {
+        editingId = actEl.dataset.mid;
+        render();
+      } else if (act === 'cancel-edit') {
+        editingId = null;
+        render();
+      } else if (act === 'save-edit') {
+        const ta = card.querySelector(`[data-edit="${actEl.dataset.mid}"]`);
+        const body = ta && ta.value.trim();
+        if (!body) return;
+        await req('PATCH', `/threads/${tid}/messages/${actEl.dataset.mid}`, { body });
+        editingId = null;
+        await refresh();
+      }
+    } catch { /* next poll reconciles */ }
+  }
+
+  // ---------- polling ----------
+
+  async function poll() {
+    try {
+      const st = await req('GET', '/state');
+      if (disconnected) { disconnected = false; render(); }
+      if (initialEtag === null) initialEtag = st.doc_etag;
+      else if (st.doc_etag !== initialEtag && !docUpdated) { docUpdated = true; render(); }
+      if (st.watched !== watched) { watched = st.watched; render(); }
+      if (st.rev !== data.rev) await refresh();
+    } catch {
+      if (!disconnected) { disconnected = true; render(); }
+    }
+    setTimeout(poll, 2500);
+  }
+
+  // ---------- init ----------
+
+  function init() {
+    content = document.getElementById('explain-content');
+    sidebar = document.getElementById('ex-sidebar');
+    if (!content || !sidebar) return;
+
+    toggleBtn = document.createElement('button');
+    toggleBtn.className = 'ex-sidebar-toggle';
+    toggleBtn.textContent = '💬';
+    toggleBtn.addEventListener('click', () => document.body.classList.toggle('ex-sidebar-open'));
+    document.body.appendChild(toggleBtn);
+
+    setupViews();
+    setupSteps();
+    content.addEventListener('click', (e) => {
+      const g = e.target.closest('[data-goto]');
+      if (g && views.has(g.dataset.goto)) {
+        e.preventDefault();
+        location.hash = '#/' + encodeURIComponent(g.dataset.goto);
+      }
+    });
+
+    document.addEventListener('mouseup', onMouseUp);
+    content.addEventListener('click', onContentClick);
+    sidebar.addEventListener('click', onSidebarClick);
+    sidebar.addEventListener('focusout', () => {
+      setTimeout(() => { if (renderPending) render(); }, 100);
+    });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') removeFloating(); });
+
+    fetch(`/${encodeURIComponent(CFG.slug)}/doc.json`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((m) => { docMeta = m; render(); })
+      .catch(() => {});
+
+    buildIndex();
+    render();
+    poll();
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})();
