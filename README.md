@@ -28,3 +28,7 @@ npx skills add hongzio/explain -g     # global
 - Codex: `$explain …`
 
 The skill is explicit-invocation only on both agents.
+
+## License
+
+[MIT](LICENSE)
