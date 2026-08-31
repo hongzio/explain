@@ -103,9 +103,11 @@ sentences; a view should fit in roughly two screens.
 
 **Views (drill-down pages).** Wrap each page in
 `<section data-view="id" data-title="Short label" data-parent="parentid">`.
-Exactly one view has no `data-parent` — that's the home view. Breadcrumbs
-render automatically; navigate with `<a href="#/id">` or `data-goto="id"`
-on any element (including SVG nodes wrapped in `<a href="#/id">`).
+Exactly one view has no `data-parent` — that's the home view. Breadcrumbs and
+a collapsible left sidebar listing the whole view tree render automatically,
+both labelled from `data-title`, so keep those labels short and meaningful.
+Navigate with `<a href="#/id">` or `data-goto="id"` on any element (including
+SVG nodes wrapped in `<a href="#/id">`).
 
 - **L0 home**: one big-structure diagram (every node clickable, linking to
   its L1 view) and/or an `.ex-cards` grid of `<a class="ex-card"
@@ -181,7 +183,8 @@ wide trees, left-to-right for deep chains, and prefer a **task-scoped
 trace** (one flow, its actual call path) over a whole-repo map — whole-repo
 graphs overwhelm and mislead.
 
-**Toolbox summary**: views + breadcrumbs, clickable SVG/cards, `.ex-steps`,
+**Toolbox summary**: views + breadcrumbs + hierarchy sidebar, clickable
+SVG/cards, `.ex-steps`,
 `.ex-walkthrough`, `<details>`, tables. These are plain HTML conventions
 that `assets/explain.js` enhances — write no `<script>` of your own, and no
 external URLs, images, or fonts (only the `/assets/…` references already in

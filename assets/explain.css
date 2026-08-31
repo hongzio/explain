@@ -119,6 +119,95 @@ button, textarea, input { font-family: inherit; }
 }
 @media (max-width: 960px) { .ex-sidebar-toggle { display: block; } }
 
+/* ---- left nav: the document's view hierarchy ---- */
+/* hidden unless the document actually has views (JS adds .ex-has-nav) */
+#ex-nav { display: none; }
+body.ex-has-nav #ex-nav {
+  display: block;
+  border-right: 1px solid var(--ex-line);
+  background: var(--ex-panel);
+  height: 100vh;
+  position: sticky;
+  top: 0;
+  overflow-y: auto;
+  padding: 1rem 0.75rem;
+  font-size: 0.8125rem;
+  min-width: 0;
+}
+@media (min-width: 961px) {
+  body.ex-has-nav .ex-layout {
+    grid-template-columns: 260px minmax(0, 1fr) 360px;
+    transition: grid-template-columns 0.2s ease-out;
+  }
+  body.ex-has-nav.ex-nav-collapsed .ex-layout { grid-template-columns: 0 minmax(0, 1fr) 360px; }
+  /* visibility (not just opacity) so collapsed links leave the tab order */
+  body.ex-has-nav.ex-nav-collapsed #ex-nav {
+    padding-inline: 0; border-right-width: 0;
+    opacity: 0; visibility: hidden; overflow: hidden;
+    transition: opacity 0.12s ease-out, visibility 0s linear 0.12s;
+  }
+}
+@media (max-width: 960px) {
+  body.ex-has-nav #ex-nav {
+    position: fixed; top: 0; left: 0; z-index: 40;
+    width: min(280px, 88vw); height: 100vh;
+    transform: translateX(-105%);
+    visibility: hidden;
+    transition: transform 0.22s cubic-bezier(0.175, 0.885, 0.32, 1.1),
+      visibility 0s linear 0.22s;
+    box-shadow: var(--ex-shadow-lg);
+  }
+  body.ex-has-nav.ex-nav-open #ex-nav {
+    transform: translateX(0); visibility: visible;
+    transition: transform 0.22s cubic-bezier(0.175, 0.885, 0.32, 1.1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.ex-has-nav .ex-layout, body.ex-has-nav #ex-nav { transition: none; }
+}
+.ex-nav-head {
+  font-size: 0.68rem; font-weight: 600; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--ex-faint);
+  padding: 0 0.5rem; margin-bottom: 0.7rem;
+}
+.ex-nav-tree ul { list-style: none; margin: 0; padding: 0; }
+.ex-nav-item {
+  display: flex; align-items: flex-start; gap: 0.1rem;
+  border-radius: 7px; margin: 1px 0;
+  padding-left: calc(var(--ex-nav-depth, 0) * 0.8rem);
+  transition: background 0.12s ease-out;
+}
+.ex-nav-item:hover { background: var(--ex-line); }
+.ex-nav-item.ex-nav-current { background: var(--ex-accent-soft); }
+.ex-nav-item.ex-nav-current .ex-nav-link { color: var(--ex-accent); font-weight: 600; }
+.ex-nav-link {
+  flex: 1; min-width: 0;
+  color: var(--ex-muted); text-decoration: none;
+  padding: 0.3rem 0.5rem 0.3rem 0.05rem;
+  line-height: 1.45; overflow-wrap: anywhere;
+  transition: color 0.12s ease-out;
+}
+.ex-nav-link:hover { color: var(--ex-fg); }
+.ex-nav-twisty {
+  flex: none; width: 1.15rem; height: 1.55rem;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; background: none; color: var(--ex-faint);
+  font-size: 0.58rem; line-height: 1; padding: 0; cursor: pointer;
+  transition: transform 0.12s ease-out, color 0.12s ease-out;
+}
+.ex-nav-twisty:hover { color: var(--ex-fg); }
+.ex-nav-twisty.ex-nav-expanded { transform: rotate(90deg); }
+.ex-nav-twisty.ex-nav-leaf { cursor: default; }
+/* sidebar collapse control, lives at the head of the breadcrumb bar */
+.ex-nav-toggle {
+  flex: none; margin-right: 0.2rem;
+  border: none; background: none; color: var(--ex-faint);
+  font-size: 0.9rem; line-height: 1; padding: 0.15rem 0.35rem;
+  border-radius: 6px; cursor: pointer;
+  transition: color 0.12s ease-out, background 0.12s ease-out;
+}
+.ex-nav-toggle:hover { color: var(--ex-fg); background: var(--ex-line); }
+
 /* ---- document typography ---- */
 #explain-content h1 {
   font-size: 2.1rem; font-weight: 650; letter-spacing: -0.035em;

@@ -47,6 +47,9 @@
       tabView: 'Tabs',
       generatedFrom: 'Generated from',
       goToAnchor: 'Go to text',
+      contents: 'Contents',
+      toggleNav: 'Toggle sidebar',
+      toggleBranch: 'Expand or collapse',
     },
     ko: {
       comments: '댓글',
@@ -80,6 +83,9 @@
       tabView: '탭 보기',
       generatedFrom: '생성 기준',
       goToAnchor: '위치로 이동',
+      contents: '목차',
+      toggleNav: '사이드바 접기/펼치기',
+      toggleBranch: '펼치기/접기',
     },
   };
   const S = STRINGS[CFG.lang] || STRINGS.en;
@@ -92,6 +98,8 @@
   let views = new Map();          // viewId -> {el, title, parent}
   let activeView = null;
   let crumbs = null;
+  let navTree = null;             // the left hierarchy sidebar's <nav>
+  const navCollapsed = new Set(); // view ids whose children are folded away
   let ranges = new Map();         // threadId -> Range|null
   let openId = null;              // expanded thread
   let editingId = null;           // message id being edited
@@ -136,7 +144,12 @@
     }
     crumbs = document.createElement('nav');
     crumbs.className = 'ex-crumbs ex-ui';
+    // delegated: activateView() rewrites the bar's innerHTML on every navigation
+    crumbs.addEventListener('click', (e) => {
+      if (e.target.closest('[data-act="toggle-nav"]')) toggleNav();
+    });
     content.prepend(crumbs);
+    setupNav();
     window.addEventListener('hashchange', applyHash);
     applyHash();
   }
@@ -177,14 +190,121 @@
     const trail = [];
     for (let cur = id; cur; cur = (views.get(cur) || {}).parent) trail.unshift(cur);
     if (trail[0] !== homeId()) trail.unshift(homeId());
-    crumbs.innerHTML = trail
-      .map((vid, i) =>
-        i === trail.length - 1
-          ? `<span class="ex-crumb-here">${esc(views.get(vid).title)}</span>`
-          : `<a href="#/${encodeURIComponent(vid)}">${esc(views.get(vid).title)}</a>`
-      )
-      .join('<span class="ex-crumb-sep">›</span>');
+    crumbs.innerHTML =
+      `<button class="ex-nav-toggle" data-act="toggle-nav" title="${esc(S.toggleNav)}"` +
+      ` aria-label="${esc(S.toggleNav)}">☰</button>` +
+      trail
+        .map((vid, i) =>
+          i === trail.length - 1
+            ? `<span class="ex-crumb-here">${esc(views.get(vid).title)}</span>`
+            : `<a href="#/${encodeURIComponent(vid)}">${esc(views.get(vid).title)}</a>`
+        )
+        .join('<span class="ex-crumb-sep">›</span>');
+    syncNav(id);
     paintHighlights();
+  }
+
+  // ---------- left nav: the view hierarchy ----------
+
+  function setupNav() {
+    let nav = document.getElementById('ex-nav');
+    if (!nav) {
+      // documents generated before this kit shipped the nav have no placeholder
+      nav = document.createElement('aside');
+      nav.id = 'ex-nav';
+      (content.closest('.ex-layout') || content.parentElement).prepend(nav);
+    }
+    nav.innerHTML =
+      `<div class="ex-nav-head">${esc(S.contents)}</div><nav class="ex-nav-tree"></nav>`;
+    navTree = nav.querySelector('.ex-nav-tree');
+    navTree.addEventListener('click', onNavClick);
+    document.body.classList.add('ex-has-nav');
+    try {
+      if (localStorage.getItem('explain:nav-collapsed') === '1') {
+        document.body.classList.add('ex-nav-collapsed');
+      }
+    } catch { /* storage unavailable */ }
+    renderNav();
+  }
+
+  function toggleNav() {
+    if (window.innerWidth <= 960) {
+      document.body.classList.toggle('ex-nav-open');
+      return;
+    }
+    const collapsed = document.body.classList.toggle('ex-nav-collapsed');
+    try {
+      localStorage.setItem('explain:nav-collapsed', collapsed ? '1' : '0');
+    } catch { /* storage unavailable */ }
+  }
+
+  /* parent -> [child ids] in document order; a view whose data-parent is
+   * missing hangs off home rather than disappearing from the tree */
+  function navChildren() {
+    const home = homeId();
+    const kids = new Map();
+    for (const [id, v] of views) {
+      if (id === home) continue;
+      const parent = v.parent && views.has(v.parent) ? v.parent : home;
+      if (!kids.has(parent)) kids.set(parent, []);
+      kids.get(parent).push(id);
+    }
+    return kids;
+  }
+
+  function renderNav() {
+    if (!navTree) return;
+    const kids = navChildren();
+    const drawn = new Set(); // also breaks data-parent cycles
+    const build = (id, depth) => {
+      if (drawn.has(id) || !views.has(id)) return '';
+      drawn.add(id);
+      const children = kids.get(id) || [];
+      const folded = navCollapsed.has(id);
+      const twisty = children.length
+        ? `<button class="ex-nav-twisty${folded ? '' : ' ex-nav-expanded'}"` +
+          ` data-twisty="${esc(id)}" aria-label="${esc(S.toggleBranch)}"` +
+          ` aria-expanded="${folded ? 'false' : 'true'}">▶</button>`
+        : '<span class="ex-nav-twisty ex-nav-leaf"></span>';
+      const cur = id === activeView ? ' ex-nav-current' : '';
+      const sub = children.length && !folded
+        ? `<ul>${children.map((c) => build(c, depth + 1)).join('')}</ul>`
+        : '';
+      return `<li><div class="ex-nav-item${cur}" style="--ex-nav-depth:${depth}">${twisty}` +
+        `<a class="ex-nav-link" href="#/${encodeURIComponent(id)}"${cur ? ' aria-current="page"' : ''}>` +
+        `${esc(views.get(id).title)}</a></div>${sub}</li>`;
+    };
+    navTree.innerHTML = `<ul>${build(homeId(), 0)}</ul>`;
+    const here = navTree.querySelector('.ex-nav-current');
+    if (here) {
+      try { here.scrollIntoView({ block: 'nearest' }); } catch { /* older browsers */ }
+    }
+  }
+
+  // keep the active view visible: unfold its ancestors, then repaint
+  function syncNav(id) {
+    if (!navTree) return;
+    let cur = (views.get(id) || {}).parent;
+    for (let hops = 0; cur && hops < 64; hops++) {
+      navCollapsed.delete(cur);
+      cur = (views.get(cur) || {}).parent;
+    }
+    renderNav();
+  }
+
+  function onNavClick(e) {
+    const twisty = e.target.closest('[data-twisty]');
+    if (twisty) {
+      e.preventDefault();
+      const id = twisty.dataset.twisty;
+      if (!navCollapsed.delete(id)) navCollapsed.add(id);
+      renderNav();
+      return;
+    }
+    // links navigate via the hash; on narrow screens close the drawer after
+    if (e.target.closest('.ex-nav-link') && window.innerWidth <= 960) {
+      document.body.classList.remove('ex-nav-open');
+    }
   }
 
   // ---------- data-example stepper (.ex-steps) ----------
