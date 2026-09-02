@@ -229,16 +229,37 @@ from the project path, so it's stable), is idempotent to start, and shuts
 itself down when no session lease is fresh and no HTTP request has arrived
 for a few minutes.
 
-Assets are re-read from disk on every request, but `server.py` is only loaded
-when the daemon starts — so after the skill is updated, a daemon left running
-from before serves the new page against its own old API. `start` detects that
-(the daemon stamps its source digest into `server.json`) and replaces it,
-reporting `restarted_stale: true`; the page shows a banner and the watcher
-fires `server_stale` meanwhile. You do not need to `stop` first.
-
 **Always show the URL to the user in chat.** Browser opening is best-effort —
 in sandboxed environments (e.g. Codex) it may fail or need approval; the URL
-line is the fallback. `server.py stop --root …` shuts it down on request.
+line is the fallback.
+
+### Version skew: checking and restarting
+
+Assets are re-read from disk on every request, but `server.py` is only loaded
+when the daemon starts. So after the skill is updated, a daemon left running
+from before keeps serving the new page against its own old API — the page
+outruns the endpoints it calls, and requests fail for reasons that look like
+UI bugs. The daemon stamps a digest of its own source into `server.json`;
+comparing that with the file on disk is how the skew gets caught.
+
+```sh
+python3 "SKILL_DIR/scripts/server.py" status --root "PROJECT/.explain"
+python3 "SKILL_DIR/scripts/server.py" start  --root "PROJECT/.explain"   # the fix
+python3 "SKILL_DIR/scripts/server.py" stop   --root "PROJECT/.explain"
+```
+
+- `status` prints `{"running", "server", "stale", "expected_source"}`.
+  `stale: true` means restart. Also reachable live at `GET <url>/api/ping`,
+  which answers `{"ok", "root", "pid", "source", "stale"}`.
+- `start` is the whole remedy: it retires a stale daemon and reports
+  `restarted_stale: true`. Do NOT `stop` first — `stop` on its own leaves
+  the project unserved, and `start` alone would otherwise see a live server
+  and do nothing.
+- You usually will not have to look: the reader's page raises a banner, and
+  the watcher fires `server_stale` (§5) so a watching session restarts
+  unprompted. Check by hand when someone reports that a control "does
+  nothing" — that is the shape this failure takes.
+- `stop` is for shutting down on request, not part of the restart path.
 
 ## 4. Catch up on unread comments
 
@@ -345,6 +366,7 @@ Base: `<url>/api/docs/<slug>`
 | Method & path | Body | Effect |
 |---|---|---|
 | GET `/state` | — | `{rev, doc_etag, watched, unseen_for_user, server_stale}` |
+| GET `<url>/api/ping` | — | `{ok, root, pid, source, stale}` — not doc-scoped; `stale` means the daemon predates `server.py` on disk (§3) |
 | GET `/comments` | — | full comment data `{rev, threads:[…]}` |
 | POST `/threads` | `{body, anchor?:{exact,prefix,suffix}, context?:{view,title}, author?}` | new thread (user → `unread`); no `anchor` → document-level |
 | POST `/threads/<tid>/messages` | `{author, body}` | reply; user → `unread`, agent → `answered` |

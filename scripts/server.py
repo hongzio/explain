@@ -729,7 +729,13 @@ def cmd_start(args) -> int:
 def cmd_status(args) -> int:
     root = Path(args.root).resolve()
     info = running_server(root)
-    print(json.dumps({"running": info is not None, "server": info}))
+    out = {"running": info is not None, "server": info, "expected_source": RUNNING_DIGEST}
+    if info is not None:
+        live = ping(info["port"]) or {}
+        # a daemon old enough not to report `stale` never stamped a source
+        # either, so its absence is itself the answer
+        out["stale"] = bool(live["stale"]) if "stale" in live else info.get("source") != RUNNING_DIGEST
+    print(json.dumps(out))
     return 0
 
 
