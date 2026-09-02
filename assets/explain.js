@@ -1,4 +1,8 @@
-/* explain skill — comment layer.
+/* explain skill — conversation layer.
+ *
+ * The sidebar holds two kinds of thread, in one list: comments anchored to a
+ * text selection, and document-level conversations started from the panel's
+ * own button (anchor: null, optionally carrying the view the reader was on).
  *
  * Anchors: {exact, prefix, suffix} captured from the reader's selection and
  * re-located against #explain-content's concatenated text on every load, so
@@ -16,8 +20,11 @@
 
   const STRINGS = {
     en: {
-      comments: 'Comments',
+      panelTitle: 'Conversations',
       addComment: 'Comment',
+      newConversation: 'New conversation',
+      newPlaceholder: 'Ask anything about this document…',
+      includePage: 'Include current page',
       placeholder: 'Leave a comment on the selected text…',
       replyPlaceholder: 'Reply…',
       send: 'Send',
@@ -35,7 +42,7 @@
       unread: 'Waiting for agent',
       newReply: 'New reply',
       orphaned: 'Lost anchor',
-      empty: 'Select some text in the document to leave a comment.',
+      empty: 'Start a conversation, or select text in the document to comment on it.',
       watching: 'An agent session is watching this document.',
       notWatching: 'No agent is watching right now — comments will be answered when a session resumes.',
       docUpdated: 'This document was updated.',
@@ -52,8 +59,11 @@
       toggleBranch: 'Expand or collapse',
     },
     ko: {
-      comments: '댓글',
+      panelTitle: '대화',
       addComment: '댓글',
+      newConversation: '새 대화',
+      newPlaceholder: '이 문서에 대해 무엇이든 물어보세요…',
+      includePage: '현재 페이지 포함',
       placeholder: '선택한 부분에 댓글을 남겨보세요…',
       replyPlaceholder: '답글…',
       send: '등록',
@@ -71,7 +81,7 @@
       unread: '에이전트 응답 대기',
       newReply: '새 답글',
       orphaned: '위치 잃음',
-      empty: '문서에서 텍스트를 드래그하면 댓글을 남길 수 있습니다.',
+      empty: '새 대화를 시작하거나, 문서에서 텍스트를 드래그해 댓글을 남겨보세요.',
       watching: '에이전트 세션이 이 문서를 감시하고 있습니다.',
       notWatching: '지금은 감시 중인 에이전트가 없습니다 — 다음 세션이 이어받을 때 답변됩니다.',
       docUpdated: '문서가 갱신되었습니다.',
@@ -103,6 +113,9 @@
   let ranges = new Map();         // threadId -> Range|null
   let openId = null;              // expanded thread
   let editingId = null;           // message id being edited
+  let composerOpen = false;       // the anchorless "new conversation" composer
+  let composerDraft = '';         // survives the re-renders polling triggers
+  let composerIncludeView = false;
   let initialEtag = null;
   let watched = null;
   let docMeta = null;
@@ -122,10 +135,10 @@
     return res.json();
   }
 
-  async function refresh() {
+  async function refresh(force) {
     data = await req('GET', '/comments');
     relocate();
-    render();
+    render(force);
   }
 
   // ---------- drill-down views ----------
@@ -624,16 +637,41 @@
     return h;
   }
 
+  // the view a document-level conversation was started from — a hint the
+  // reader opted into, so it links but never anchors
+  function contextChip(t) {
+    const c = t.context;
+    if (!c || !c.view) return '';
+    const label = esc((c.title || c.view).slice(0, 40));
+    return views.has(c.view)
+      ? `<a class="ex-ctx-chip" href="#/${encodeURIComponent(c.view)}">${label}</a>`
+      : `<span class="ex-ctx-chip ex-ctx-gone">${label}</span>`;
+  }
+
   function threadCard(t) {
     const open = t.id === openId;
-    const orphan = !ranges.get(t.id);
+    const anchored = !!t.anchor;
+    const orphan = anchored && !ranges.get(t.id);
     const chips = [];
     if (t.status === 'unread') chips.push(`<span class="ex-chip ex-chip-unread">${esc(S.unread)}</span>`);
     if (unseenCount(t)) chips.push(`<span class="ex-chip ex-chip-new">${esc(S.newReply)}</span>`);
     if (orphan) chips.push(`<span class="ex-chip ex-chip-orphan">${esc(S.orphaned)}</span>`);
     if (t.status === 'resolved') chips.push(`<span class="ex-chip">${esc(S.resolved)}</span>`);
 
-    let inner = `<div class="ex-thread-top"><span class="ex-excerpt">“${esc(t.anchor.exact.slice(0, 90))}”</span>${chips.join('')}</div>`;
+    /* An anchor stays useful while the thread is open — it says what the
+     * comment is about. A conversation's head line is its opening message,
+     * which the expanded body repeats, so it gives way to a spacer. */
+    let head;
+    if (anchored) {
+      head = `<span class="ex-excerpt">“${esc(t.anchor.exact.slice(0, 90))}”</span>`;
+    } else if (open) {
+      head = '<span class="ex-spacer"></span>';
+    } else {
+      const first = (t.messages[0] || {}).body || '';
+      head = `<span class="ex-preview">${esc(first.slice(0, 120))}</span>`;
+    }
+
+    let inner = `<div class="ex-thread-top">${contextChip(t)}${head}${chips.join('')}</div>`;
 
     if (open) {
       inner += t.messages.map((m) => {
@@ -665,19 +703,50 @@
     return `<div class="ex-thread${open ? ' ex-open' : ''}" data-tid="${t.id}">${inner}</div>`;
   }
 
-  function render() {
-    if (sidebar.contains(document.activeElement) &&
+  /* Conversation recency, taken from the last message rather than the
+   * thread's updated_at: the server bumps updated_at on 'seen' and
+   * resolve/reopen too, so merely reading a thread would jump it to the top. */
+  function threadTime(t) {
+    const msgs = t.messages || [];
+    const last = msgs.length ? msgs[msgs.length - 1] : null;
+    return Date.parse((last && last.created_at) || t.created_at || '') || 0;
+  }
+
+  function composerHtml() {
+    if (!composerOpen) return '';
+    // no views, nothing to include: the whole document is the page
+    const check = views.size
+      ? `<label class="ex-check"><input type="checkbox" data-act="incl-view"` +
+        `${composerIncludeView ? ' checked' : ''}>${esc(S.includePage)}</label>`
+      : '';
+    return `<div class="ex-composer">` +
+      `<textarea data-new placeholder="${esc(S.newPlaceholder)}">${esc(composerDraft)}</textarea>` +
+      `<div class="ex-composer-actions">${check}<span class="ex-spacer"></span>` +
+      `<button class="ex-btn" data-act="cancel-new">${esc(S.cancel)}</button>` +
+      `<button class="ex-btn ex-btn-primary" data-act="send-new">${esc(S.send)}</button>` +
+      `</div></div>`;
+  }
+
+  // `force` renders even from a focused textarea — opening or closing the
+  // composer is itself a keyboard action and must not be deferred
+  function render(force) {
+    if (!force && sidebar.contains(document.activeElement) &&
         (document.activeElement.tagName === 'TEXTAREA' || document.activeElement.tagName === 'INPUT')) {
       renderPending = true;
       return;
     }
     renderPending = false;
 
-    const active = data.threads.filter((t) => t.status !== 'resolved');
-    const resolved = data.threads.filter((t) => t.status === 'resolved');
-    const totalUnseen = data.threads.reduce((n, t) => n + unseenCount(t), 0);
+    const threads = data.threads.slice().sort((a, b) => threadTime(b) - threadTime(a));
+    const active = threads.filter((t) => t.status !== 'resolved');
+    const resolved = threads.filter((t) => t.status === 'resolved');
+    const totalUnseen = threads.reduce((n, t) => n + unseenCount(t), 0);
 
-    let html = `<div class="ex-side-head"><span class="ex-dot ${watched ? 'ex-dot-on' : 'ex-dot-off'}"></span><h2>${esc(S.comments)}</h2></div>`;
+    let html = `<div class="ex-side-head"><div class="ex-side-title">` +
+      `<span class="ex-dot ${watched ? 'ex-dot-on' : 'ex-dot-off'}"></span>` +
+      `<h2>${esc(S.panelTitle)}</h2>` +
+      `<button class="ex-btn ex-new-btn" data-act="new-thread">＋ ${esc(S.newConversation)}</button>` +
+      `</div>${composerHtml()}</div>`;
     if (docMeta && (docMeta.commit || docMeta.updated_at)) {
       const commit = docMeta.commit ? `<code>${esc(String(docMeta.commit).slice(0, 12))}</code> · ` : '';
       html += `<div class="ex-side-meta">${esc(S.generatedFrom)} ${commit}${esc(fmtTime(docMeta.updated_at || docMeta.created_at))}</div>`;
@@ -723,18 +792,58 @@
     }
   }
 
+  function openComposer() {
+    composerOpen = true;
+    composerIncludeView = false;
+    render(true);
+    const ta = sidebar.querySelector('[data-new]');
+    if (ta) ta.focus();
+  }
+
+  function closeComposer() {
+    composerOpen = false;
+    composerDraft = '';
+    render(true);
+  }
+
+  async function submitNewThread() {
+    const ta = sidebar.querySelector('[data-new]');
+    const body = (ta ? ta.value : composerDraft).trim();
+    if (!body) return;
+    const payload = { body };
+    if (composerIncludeView && activeView && views.has(activeView)) {
+      payload.context = { view: activeView, title: views.get(activeView).title };
+    }
+    try {
+      const res = await req('POST', '/threads', payload);
+      composerOpen = false;
+      composerDraft = '';
+      openId = res.thread.id;
+      // forced: on the Cmd+Enter path the composer's textarea still holds
+      // focus, and an unforced render would defer until it blurs
+      await refresh(true);
+    } catch { /* keep the composer so the draft isn't lost */ }
+  }
+
   async function onSidebarClick(e) {
     const actEl = e.target.closest('[data-act]');
     const card = e.target.closest('.ex-thread');
     if (!actEl) {
       // re-clicking an open thread's excerpt re-reveals its anchor (view switch + scroll)
+      if (e.target.closest('a')) return; // context chip, view link in a message
       if (card && (card.dataset.tid !== openId || e.target.closest('.ex-thread-top'))) {
         openThread(card.dataset.tid);
       }
       return;
     }
     const act = actEl.dataset.act;
+    // panel-level actions, outside any thread card
     if (act === 'reload-doc') { location.reload(); return; }
+    if (act === 'new-thread') { openComposer(); return; }
+    if (act === 'cancel-new') { closeComposer(); return; }
+    if (act === 'send-new') { await submitNewThread(); return; }
+    // record the checkbox without re-rendering — that would drop the draft's caret
+    if (act === 'incl-view') { composerIncludeView = actEl.checked; return; }
     if (!card) return;
     const tid = card.dataset.tid;
     try {
@@ -822,6 +931,15 @@
     sidebar.addEventListener('click', onSidebarClick);
     sidebar.addEventListener('focusout', () => {
       setTimeout(() => { if (renderPending) render(); }, 100);
+    });
+    // mirror the draft so a poll-triggered re-render can't swallow it
+    sidebar.addEventListener('input', (e) => {
+      if (e.target.matches('[data-new]')) composerDraft = e.target.value;
+    });
+    sidebar.addEventListener('keydown', (e) => {
+      if (!e.target.matches || !e.target.matches('[data-new]')) return;
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitNewThread(); }
+      if (e.key === 'Escape') closeComposer();
     });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') removeFloating(); });
 

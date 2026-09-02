@@ -50,6 +50,7 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,80}$")
 API_DOC_RE = re.compile(r"^/api/docs/([^/]+)(/.*)?$")
 
 VALID_AUTHORS = {"user", "agent"}
+MAX_FIELD = 4000
 
 
 def now_iso() -> str:
@@ -152,6 +153,39 @@ def find_message(thread: dict, mid: str) -> dict:
         if m.get("id") == mid:
             return m
     raise ApiError(404, f"unknown message: {mid}")
+
+
+def clean_anchor(raw) -> dict | None:
+    """None — a document-level thread — or a validated {exact, prefix, suffix}."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ApiError(400, "anchor must be an object or null")
+    exact = raw.get("exact")
+    if not isinstance(exact, str) or not exact:
+        raise ApiError(400, "anchor.exact is required when anchor is given")
+
+    def ctx(key: str) -> str:
+        v = raw.get(key, "")
+        return v[:MAX_FIELD] if isinstance(v, str) else ""
+
+    return {"exact": exact[:MAX_FIELD], "prefix": ctx("prefix"), "suffix": ctx("suffix")}
+
+
+def clean_context(raw) -> dict | None:
+    """None or {view, title}: the view the reader was on. A hint, not an anchor."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ApiError(400, "context must be an object or null")
+    view = raw.get("view")
+    if not isinstance(view, str) or not view:
+        raise ApiError(400, "context.view is required when context is given")
+    title = raw.get("title")
+    return {
+        "view": view[:200],
+        "title": (title[:200] if isinstance(title, str) and title else view[:200]),
+    }
 
 
 def make_message(author: str, body: str) -> dict:
@@ -312,23 +346,19 @@ class Handler(BaseHTTPRequestHandler):
         raise ApiError(404, "unknown endpoint")
 
     def api_create_thread(self, slug: str, body: dict) -> None:
-        anchor = body.get("anchor") or {}
         text = (body.get("body") or "").strip()
         author = body.get("author", "user")
         if author not in VALID_AUTHORS:
             raise ApiError(400, "author must be 'user' or 'agent'")
         if not text:
             raise ApiError(400, "empty comment body")
-        if not isinstance(anchor.get("exact"), str) or not anchor["exact"]:
-            raise ApiError(400, "anchor.exact is required")
+        # no anchor -> a document-level conversation; the kind of a thread is
+        # read off anchor presence, never a separate field that could disagree
         thread = {
             "id": new_id("t"),
             "status": "unread" if author == "user" else "answered",
-            "anchor": {
-                "exact": anchor["exact"],
-                "prefix": anchor.get("prefix", ""),
-                "suffix": anchor.get("suffix", ""),
-            },
+            "anchor": clean_anchor(body.get("anchor")),
+            "context": clean_context(body.get("context")),
             "created_at": now_iso(),
             "updated_at": now_iso(),
             "messages": [make_message(author, text)],

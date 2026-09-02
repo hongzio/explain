@@ -2,9 +2,10 @@
 
 An agent skill (Claude Code & Codex) that turns "explain this diff / module /
 repo" into a visual HTML document — inline SVG diagrams, interactive sections —
-served on localhost, with a live comment loop: select text in the page, leave a
-comment, and the agent session watching the document replies in near real time
-(and may fix the document itself).
+served on localhost, with a live conversation loop: select text to comment on
+it, or start a thread from the sidebar without selecting anything, and the
+agent session watching the document replies in near real time (and may fix the
+document itself).
 
 - Zero dependencies: Python ≥ 3.11 stdlib only.
 - Documents and comments live in the project's `.explain/` directory

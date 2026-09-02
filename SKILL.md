@@ -4,9 +4,9 @@ description: >-
   Generate a visual HTML explanation (inline SVG diagrams, interactive
   sections) of a diff, a module/path, the whole repo, or a free question
   about the codebase; serve it on localhost from the project's .explain/
-  directory and run a live comment loop in which the agent answers reader
-  comments in near real time. Invoked explicitly only: /explain (Claude
-  Code) or $explain (Codex).
+  directory and run a live conversation loop in which the agent answers the
+  reader's comments and questions in near real time. Invoked explicitly
+  only: /explain (Claude Code) or $explain (Codex).
 disable-model-invocation: true
 metadata:
   short-description: Visual HTML code explanations with a live comment loop
@@ -235,8 +235,9 @@ line is the fallback. `server.py stop --root …` shuts it down on request.
 ## 4. Catch up on unread comments
 
 Fetch `GET <url>/api/docs/<slug>/comments` and handle every thread with
-`"status": "unread"` (§6). Do this before starting the watch loop — it covers
-comments left while no session was watching.
+`"status": "unread"` (§6) — anchored comments and document-level
+conversations arrive the same way. Do this before starting the watch loop —
+it covers comments left while no session was watching.
 
 ## 5. Watch loop
 
@@ -285,14 +286,24 @@ For each unread thread (`GET …/comments`, `threads[].status == "unread"`):
    grep verbatim in the HTML source (`the <code>foo</code> function` anchors
    as `the foo function`) — locate it ignoring tags, narrowing with
    `anchor.prefix`/`suffix` when the exact text appears more than once.
-2. Answer in the language the comment is written in. Ground the reply in
+2. `anchor: null` means a **document-level conversation** — the reader
+   started it from the sidebar rather than by selecting text, so there is no
+   passage to look up. If `context` is present (`{view, title}`) the reader
+   chose to attach the view they were reading; treat it as a hint about what
+   they mean, not as an anchor.
+3. Answer in the language the comment is written in. Ground the reply in
    evidence: cite `file.py:12` references where relevant (rendered as code),
    and `#/viewid` mentions render as links that jump to that view.
-3. If the comment points out an error or asks for a change in the document,
+4. Scope: questions about the wider repo are fair game, not just the
+   document. Do NOT change code from here — the sidebar is a reading
+   surface with no review or approval path. Answer the question and say
+   the edit belongs in the session; editing the DOCUMENT is still fine
+   (next step).
+5. If the comment points out an error or asks for a change in the document,
    you may edit the doc: rewrite `ROOT/<slug>/index.html` (and bump
    `doc.json.updated_at`), then say in your reply what you changed. Readers
    get a reload banner automatically.
-4. Reply:
+6. Reply:
    ```sh
    curl -s -X POST <url>/api/docs/<slug>/threads/<tid>/messages \
      -H 'Content-Type: application/json' \
@@ -301,7 +312,12 @@ For each unread thread (`GET …/comments`, `threads[].status == "unread"`):
    An agent reply marks the thread `answered` automatically. Never mark
    threads resolved yourself — that's the reader's button — and don't touch
    `resolved` threads unless the reader reopens them.
-5. Escape/quote carefully; body is plain text (no markdown rendering).
+7. Escape/quote carefully; body is plain text (no markdown rendering).
+
+You may also OPEN a document-level thread yourself — `POST /threads` with
+`{"author": "agent", "body": "…"}` and no anchor — when something needs
+saying that answers no existing thread. Reserve it for that; a panel of
+agent-initiated notes is noise the reader has to clear.
 
 ## 7. Ownership, takeover, stopping
 
@@ -321,7 +337,7 @@ Base: `<url>/api/docs/<slug>`
 |---|---|---|
 | GET `/state` | — | `{rev, doc_etag, watched, unseen_for_user}` |
 | GET `/comments` | — | full comment data `{rev, threads:[…]}` |
-| POST `/threads` | `{anchor:{exact,prefix,suffix}, body, author?}` | new thread (user → `unread`) |
+| POST `/threads` | `{body, anchor?:{exact,prefix,suffix}, context?:{view,title}, author?}` | new thread (user → `unread`); no `anchor` → document-level |
 | POST `/threads/<tid>/messages` | `{author, body}` | reply; user → `unread`, agent → `answered` |
 | PATCH `/threads/<tid>` | `{action: resolve\|reopen\|seen}` | status / mark agent msgs seen |
 | PATCH `/threads/<tid>/messages/<mid>` | `{body}` | edit; user edit → thread `unread` |

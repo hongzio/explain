@@ -95,7 +95,9 @@ button, textarea, input { font-family: inherit; }
   position: sticky;
   top: 0;
   overflow-y: auto;
-  padding: 1rem;
+  /* no top padding: the sticky head supplies its own, so `top: 0` pins it
+     flush against the scrollport instead of a padding-height below it */
+  padding: 0 1rem 1rem;
   font-size: 0.8125rem;
 }
 @media (max-width: 960px) {
@@ -426,14 +428,14 @@ html[lang="ko"] pre.ex-data[data-verified="executed"]::after { content: "✓ 실
   from { opacity: 0; transform: scale(0.96); }
   to { opacity: 1; transform: none; }
 }
-.ex-popover textarea, .ex-thread textarea {
+.ex-popover textarea, .ex-thread textarea, .ex-composer textarea {
   width: 100%; min-height: 4.2em; resize: vertical;
   border: 1px solid var(--ex-line-strong); border-radius: 8px;
   background: var(--ex-bg); color: var(--ex-fg);
   font-size: 0.8125rem; line-height: 1.55; padding: 0.5rem 0.6rem;
   transition: border-color 0.12s ease-out, box-shadow 0.12s ease-out;
 }
-.ex-popover textarea:focus, .ex-thread textarea:focus {
+.ex-popover textarea:focus, .ex-thread textarea:focus, .ex-composer textarea:focus {
   outline: none; border-color: var(--ex-accent);
   box-shadow: 0 0 0 3px var(--ex-accent-soft);
 }
@@ -457,12 +459,30 @@ html[lang="ko"] pre.ex-data[data-verified="executed"]::after { content: "✓ 실
 .ex-btn-ghost:hover { color: var(--ex-danger); }
 
 /* ---- sidebar ---- */
-.ex-side-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.7rem; }
-.ex-side-head h2 {
+/* the head pins to the top of the scrolling panel so "new conversation" and
+   its composer stay reachable however far down the list you are */
+.ex-side-head {
+  position: sticky; top: 0; z-index: 5;
+  margin: 0 -1rem 0.7rem; padding: 1rem 1rem 0.7rem;
+  background: var(--ex-panel);
+  border-bottom: 1px solid var(--ex-line);
+}
+.ex-side-title { display: flex; align-items: center; gap: 0.5rem; }
+.ex-side-title h2 {
   font-size: 0.8125rem; font-weight: 600; letter-spacing: 0.01em;
   margin: 0; flex: 1;
 }
-.ex-side-meta { font-size: 0.72rem; color: var(--ex-faint); margin: -0.35rem 0 0.8rem; }
+.ex-new-btn { flex: none; font-size: 0.72rem; padding: 0.22rem 0.6rem; }
+.ex-composer { margin-top: 0.6rem; }
+.ex-composer-actions { display: flex; align-items: center; gap: 0.45rem; margin-top: 0.55rem; }
+.ex-check {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  font-size: 0.72rem; color: var(--ex-muted); cursor: pointer;
+  user-select: none; -webkit-user-select: none;
+}
+.ex-check input { accent-color: var(--ex-accent); margin: 0; }
+.ex-spacer { flex: 1; }
+.ex-side-meta { font-size: 0.72rem; color: var(--ex-faint); margin: 0 0 0.7rem; }
 .ex-side-meta code {
   font: 500 0.95em ui-monospace, "SF Mono", Menlo, monospace;
   background: var(--ex-surface); border: 1px solid var(--ex-line);
@@ -499,6 +519,23 @@ html[lang="ko"] pre.ex-data[data-verified="executed"]::after { content: "✓ 실
   flex: 1; min-width: 0; color: var(--ex-muted); font-style: italic;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* a conversation's opening line: an utterance, not a quotation — upright
+   and in body ink, so the two kinds of card read apart at a glance */
+.ex-preview {
+  flex: 1; min-width: 0; color: var(--ex-fg);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ex-ctx-chip {
+  flex: none; max-width: 9rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 0.66rem; font-weight: 500; line-height: 1.6;
+  border-radius: 999px; padding: 0.06rem 0.5rem;
+  background: var(--ex-accent-soft); color: var(--ex-accent); text-decoration: none;
+  transition: background 0.12s ease-out;
+}
+a.ex-ctx-chip:hover { background: color-mix(in srgb, var(--ex-accent) 22%, transparent); }
+/* the view is gone from a regenerated document — label only, nowhere to go */
+.ex-ctx-gone { background: var(--ex-line); color: var(--ex-faint); }
 .ex-chip {
   flex: none; font-size: 0.66rem; font-weight: 500; letter-spacing: 0.01em;
   border-radius: 999px; padding: 0.06rem 0.5rem;
@@ -522,7 +559,6 @@ html[lang="ko"] pre.ex-data[data-verified="executed"]::after { content: "✓ 실
 .ex-msg-tools { display: none; gap: 0.2rem; margin-left: auto; }
 .ex-msg:hover .ex-msg-tools { display: inline-flex; }
 .ex-thread-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.65rem; align-items: center; }
-.ex-thread-actions .ex-spacer { flex: 1; }
 
 .ex-resolved-group { margin-top: 1.1rem; }
 .ex-resolved-group summary { cursor: pointer; color: var(--ex-faint); font-size: 0.75rem; font-weight: 500; }
