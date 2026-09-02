@@ -23,7 +23,8 @@ Definitions used below:
   path from how the skill was loaded). Scripts and assets are referenced
   relative to it. Do not rely on agent-specific variables.
 - `PROJECT` — the project root (normally the current working directory).
-- `ROOT` — `PROJECT/.explain`, where documents, comments, and server state live.
+- `ROOT` — `PROJECT/.explain`, where documents, comments, past versions, and
+  server state live.
 
 Requirements: `python3` ≥ 3.11 on PATH (stdlib only, no packages). Check with
 `python3 --version` if you have any doubt.
@@ -84,8 +85,25 @@ Comment replies instead follow the language of the comment they answer.
    the doc yourself against the sources with that same brief. Fix what
    survives scrutiny, re-validate, then serve. The validator proves the
    evidence is real; this pass is what checks the narrative around it.
-7. Never write `comments.json` yourself — the server owns it.
-8. **Updating an existing doc** (code changed / “update it”): hash the
+7. Record the version — after every write of `index.html`, including the
+   first. Needs the server, so on a new document this comes right after §3;
+   on an update you are already serving, so do it as soon as the write lands:
+   ```sh
+   curl -s -X POST <url>/api/docs/<slug>/versions \
+     -H 'Content-Type: application/json' \
+     -d '{"summary": "…", "threads": ["t-…"]}'
+   ```
+   `summary` is ONE sentence in the document's language saying **what
+   changed** (“first pass” for a new document). `threads` lists the thread
+   ids whose feedback prompted the change — that is what lets a reader get
+   from a version back to the conversation that caused it. The snapshot
+   itself happens with or without you (the server takes one when it sees the
+   file move, labelled “auto-recorded”); these two fields are the entire
+   reason the entry is worth reading. The reader gets the before/after
+   comparison from the page — never diff anything yourself.
+8. Never write `comments.json` or `versions.json` yourself — the server owns
+   both.
+9. **Updating an existing doc** (code changed / “update it”): hash the
    current `sources` files and compare with `doc.json`. Rewrite only the
    sections whose evidence drifted; keep other sections verbatim (comment
    anchors survive on unchanged wording — unlocatable ones show as “lost
@@ -331,8 +349,15 @@ For each unread thread (`GET …/comments`, `threads[].status == "unread"`):
    (next step).
 5. If the comment points out an error or asks for a change in the document,
    you may edit the doc: rewrite `ROOT/<slug>/index.html` (and bump
-   `doc.json.updated_at`), then say in your reply what you changed. Readers
-   get a reload banner automatically.
+   `doc.json.updated_at`), then record the version (§2-7) with this thread's
+   id in `threads`. Readers get a reload banner automatically, and it offers
+   them the diff.
+
+   Split the two texts by audience rather than repeating one in the other:
+   the **reply** says *why* — what the comment got right, what was wrong
+   before — for the person following the conversation; the **version
+   summary** says *what changed*, in one line, for whoever scans the history
+   weeks later. Don't restate the whole edit in the reply; the diff shows it.
 6. Reply:
    ```sh
    curl -s -X POST <url>/api/docs/<slug>/threads/<tid>/messages \
@@ -365,7 +390,9 @@ Base: `<url>/api/docs/<slug>`
 
 | Method & path | Body | Effect |
 |---|---|---|
-| GET `/state` | — | `{rev, doc_etag, watched, unseen_for_user, server_stale}` |
+| GET `/state` | — | `{rev, doc_etag, watched, unseen_for_user, server_stale, version}` |
+| GET `/versions` | — | `{versions:[{n, hash, created_at, summary, threads, source, commit}, …]}` |
+| POST `/versions` | `{summary?, threads?}` | record/annotate the current `index.html` (§2-7); 409 if the file is missing or half-written |
 | GET `<url>/api/ping` | — | `{ok, root, pid, source, stale}` — not doc-scoped; `stale` means the daemon predates `server.py` on disk (§3) |
 | GET `/comments` | — | full comment data `{rev, threads:[…]}` |
 | POST `/threads` | `{body, anchor?:{exact,prefix,suffix}, context?:{view,title}, author?}` | new thread (user → `unread`); no `anchor` → document-level |

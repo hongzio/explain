@@ -11,6 +11,9 @@ document itself).
 - Documents and comments live in the project's `.explain/` directory
   (gitignored) and survive across sessions; a new session catches up on
   unanswered comments and takes over watching.
+- Every rewrite is kept as a version, so when the agent revises the document
+  after your feedback you can see exactly which sections changed — and which
+  comment prompted it — instead of rereading the whole page.
 - One server per project (stable port derived from the project path); comment
   routing to the right session is done by per-session file watchers, so
   different sessions can own different documents concurrently — even mixed

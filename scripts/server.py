@@ -22,6 +22,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import signal
 import socket
 import subprocess
@@ -46,6 +47,8 @@ HTTP_IDLE_GRACE = 300  # keep serving this long after the last HTTP request
 GC_INTERVAL = 60
 START_WAIT = 10.0
 MAX_BODY = 1_000_000
+MAX_VERSIONS = 50      # v1 plus the newest MAX_VERSIONS-1 survive pruning
+MAX_THREAD_REFS = 20
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,80}$")
 API_DOC_RE = re.compile(r"^/api/docs/([^/]+)(/.*)?$")
@@ -111,6 +114,17 @@ def write_json_atomic(path: Path, data) -> None:
     os.replace(tmp, path)
 
 
+def looks_complete(text: str) -> bool:
+    """Whether a document read off disk is a whole document.
+
+    The agent rewrites index.html by truncating and writing, so a request
+    arriving mid-write reads half a file. Snapshotting that half would put a
+    meaningless version in the history forever, and make the diff on either
+    side of it read as "the document vanished and came back".
+    """
+    return 'id="explain-content"' in text and text.rstrip().endswith("</html>")
+
+
 class ApiError(Exception):
     def __init__(self, status: int, message: str):
         super().__init__(message)
@@ -123,6 +137,7 @@ class Store:
         self.root = root
         self.lock = threading.Lock()
         self.last_http = time.time()
+        self.skipped: set[str] = set()  # docs whose last snapshot attempt hit a half-written file
 
     def doc_dir(self, slug: str) -> Path:
         return self.root / slug
@@ -173,6 +188,147 @@ class Store:
             return f"{st.st_mtime_ns}-{st.st_size}"
         except OSError:
             return "missing"
+
+    # -- version history --------------------------------------------------
+    #
+    # The agent owns index.html and rewrites it wholesale; the server never
+    # writes it. So history is captured by observation: any request that
+    # touches a doc records the current file if it isn't recorded yet, and
+    # the agent's explicit POST attaches the summary and the threads that
+    # prompted the change. A version's identity is the sha256 of its
+    # index.html, which is what lets those two paths race freely — whichever
+    # arrives second finds the content already stored and only adds metadata.
+
+    def versions_dir(self, slug: str) -> Path:
+        return self.doc_dir(slug) / "versions"
+
+    def versions_path(self, slug: str) -> Path:
+        return self.doc_dir(slug) / "versions.json"
+
+    def load_versions(self, slug: str) -> dict:
+        data = read_json(self.versions_path(slug), {"versions": []})
+        if not isinstance(data, dict) or not isinstance(data.get("versions"), list):
+            return {"versions": []}
+        return data
+
+    def next_seq(self, slug: str, entries: list) -> int:
+        """One past the highest number in the index OR on disk.
+
+        Consulting the directory as well means a lost or corrupt
+        versions.json costs the metadata but never overwrites a stored
+        snapshot with a recycled number.
+        """
+        highest = max((e.get("n", 0) for e in entries), default=0)
+        try:
+            for d in self.versions_dir(slug).iterdir():
+                if d.is_dir() and d.name.isdigit():
+                    highest = max(highest, int(d.name))
+        except OSError:
+            pass
+        return highest + 1
+
+    def prune_versions(self, slug: str, entries: list) -> None:
+        """Keep the first version and the newest MAX_VERSIONS-1.
+
+        v1 survives because "what did this look like originally" is asked as
+        often as "what changed last"; the gap in the numbering is its own
+        signal that the middle was collected.
+        """
+        if len(entries) <= MAX_VERSIONS:
+            return
+        cut = -(MAX_VERSIONS - 1)
+        dropped = entries[1:cut]
+        del entries[1:cut]
+        for e in dropped:
+            shutil.rmtree(self.versions_dir(slug) / f"{e['n']:04d}", ignore_errors=True)
+
+    def ensure_version(
+        self,
+        slug: str,
+        summary: str | None = None,
+        threads: list | None = None,
+        source: str = "auto",
+    ) -> dict | None:
+        """Record index.html as a version if it isn't one already.
+
+        Returns the entry the file on disk currently maps to, or None when
+        it cannot be recorded — missing, unreadable, or caught mid-write.
+        Passive callers ignore the result; the agent's POST turns None into
+        an error, because silently attaching its summary to the PREVIOUS
+        version would misfile the very thing the summary explains.
+        """
+        html_path = self.doc_dir(slug) / "index.html"
+        try:
+            st = html_path.stat()
+        except OSError:
+            return None
+        etag = f"{st.st_mtime_ns}-{st.st_size}"
+        meta_wanted = bool(summary or threads or source == "agent")
+
+        with self.lock:
+            data = self.load_versions(slug)
+            entries = data["versions"]
+            latest = entries[-1] if entries else None
+            # steady state: the page polls every 2.5s and the file has not
+            # moved, so stop at the stat() rather than hashing the document
+            if latest is not None and latest.get("etag") == etag and not meta_wanted:
+                return latest
+
+            try:
+                raw = html_path.read_bytes()
+            except OSError:
+                return None
+            if not looks_complete(raw.decode("utf-8", "replace")):
+                if slug not in self.skipped:
+                    self.skipped.add(slug)
+                    sys.stderr.write(f"{slug}: index.html looks half-written; version not recorded\n")
+                return None
+            self.skipped.discard(slug)
+
+            digest = hashlib.sha256(raw).hexdigest()[:16]
+            if latest is not None and latest.get("hash") == digest:
+                latest["etag"] = etag  # same bytes rewritten; skip the rehash next time
+                entry = latest
+            else:
+                entry = self.write_version(slug, entries, digest, etag, raw)
+                entries.append(entry)
+                self.prune_versions(slug, entries)
+
+            if summary:
+                entry["summary"] = summary
+            if threads:
+                seen = entry.setdefault("threads", [])
+                seen.extend(t for t in threads if t not in seen)
+            if source == "agent":
+                entry["source"] = "agent"
+
+            write_json_atomic(self.versions_path(slug), data)
+            return entry
+
+    def write_version(self, slug: str, entries: list, digest: str, etag: str, raw: bytes) -> dict:
+        """Copy index.html AND doc.json into versions/NNNN/.
+
+        doc.json rides along so each snapshot carries the commit and source
+        hashes it was generated from — which is also why this server never
+        has to know what git is.
+        """
+        seq = self.next_seq(slug, entries)
+        vdir = self.versions_dir(slug) / f"{seq:04d}"
+        vdir.mkdir(parents=True, exist_ok=True)
+        (vdir / "index.html").write_bytes(raw)
+        meta = read_json(self.doc_dir(slug) / "doc.json", {})
+        if meta:
+            write_json_atomic(vdir / "doc.json", meta)
+        return {
+            "n": seq,
+            "hash": digest,
+            "etag": etag,
+            "created_at": now_iso(),
+            "summary": None,
+            "threads": [],
+            "source": "auto",
+            "commit": meta.get("commit"),
+        }
 
 
 STORE: Store | None = None
@@ -354,6 +510,7 @@ class Handler(BaseHTTPRequestHandler):
                 for msg in t.get("messages", [])
                 if msg.get("author") == "agent" and not msg.get("seen_by_user")
             )
+            current = STORE.ensure_version(slug)
             self.send_json(
                 200,
                 {
@@ -362,12 +519,22 @@ class Handler(BaseHTTPRequestHandler):
                     "watched": STORE.lease_fresh(slug),
                     "unseen_for_user": unseen,
                     "server_stale": server_stale(),
+                    "version": current["n"] if current else None,
                 },
             )
             return
 
         if rest == "/comments" and method == "GET":
             self.send_json(200, STORE.load_comments(slug))
+            return
+
+        if rest == "/versions" and method == "GET":
+            STORE.ensure_version(slug)
+            self.send_json(200, STORE.load_versions(slug))
+            return
+
+        if rest == "/versions" and method == "POST":
+            self.api_create_version(slug, self.read_body())
             return
 
         if rest == "/threads" and method == "POST":
@@ -416,6 +583,23 @@ class Handler(BaseHTTPRequestHandler):
 
         data = STORE.mutate(slug, fn)
         self.send_json(201, {"rev": data["rev"], "thread": thread})
+
+    def api_create_version(self, slug: str, body: dict) -> None:
+        if not STORE.doc_dir(slug).is_dir():
+            raise ApiError(404, f"unknown doc: {slug}")
+        summary = body.get("summary")
+        summary = summary.strip()[:MAX_FIELD] if isinstance(summary, str) else ""
+        raw_threads = body.get("threads") or []
+        if not isinstance(raw_threads, list):
+            raise ApiError(400, "threads must be a list of thread ids")
+        threads = [t[:200] for t in raw_threads if isinstance(t, str) and t][:MAX_THREAD_REFS]
+        # the ids are stored unverified: a thread can be deleted later, so
+        # referential integrity is not on offer either way, and the page
+        # simply omits chips for threads that are no longer there
+        entry = STORE.ensure_version(slug, summary=summary or None, threads=threads, source="agent")
+        if entry is None:
+            raise ApiError(409, "index.html is missing or half-written; record the version after the write completes")
+        self.send_json(201, {"version": entry})
 
     def api_add_message(self, slug: str, tid: str, body: dict) -> None:
         author = body.get("author", "user")
@@ -520,6 +704,12 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/([a-z0-9][a-z0-9._-]{0,80})/(.*)$", path)
         if m:
             slug, rel = m.group(1), m.group(2) or "index.html"
+            # serving the live document is the earliest moment a baseline can
+            # exist; without it, a doc opened and closed before the first poll
+            # would leave its starting point unrecorded. Past snapshots under
+            # versions/ are served as plain files and never re-enter history.
+            if rel == "index.html":
+                STORE.ensure_version(slug)
             self.serve_file(STORE.doc_dir(slug), rel)
             return
         raise ApiError(404, "not found")

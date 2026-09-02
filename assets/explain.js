@@ -59,6 +59,29 @@
       contents: 'Contents',
       toggleNav: 'Toggle sidebar',
       toggleBranch: 'Expand or collapse',
+      versions: 'Versions',
+      versionsTitle: 'Version history',
+      historyStart: 'History starts here — nothing before this was recorded.',
+      current: 'Current',
+      autoRecorded: 'Auto-recorded',
+      noSummary: 'No summary',
+      compareSelected: 'Compare selected',
+      showChanges: 'See what changed',
+      close: 'Close',
+      versionsFailed: "Couldn't load the version history.",
+      changedSections: 'Changed sections',
+      noChanges: 'These two versions are identical.',
+      sectionAdded: 'Added',
+      sectionRemoved: 'Removed',
+      titleChanged: 'Title changed',
+      unchangedBlocks: '{n} unchanged',
+      diagramLayout: 'Diagram — layout only',
+      diagramChanged: 'Diagram changed',
+      before: 'Before',
+      after: 'After',
+      fullVersion: 'View this whole version',
+      backToChanges: 'Back to changes',
+      discussSection: 'Discuss this section',
     },
     ko: {
       panelTitle: '대화',
@@ -100,6 +123,29 @@
       contents: '목차',
       toggleNav: '사이드바 접기/펼치기',
       toggleBranch: '펼치기/접기',
+      versions: '버전 기록',
+      versionsTitle: '버전 기록',
+      historyStart: '여기부터 기록이 시작됩니다 — 그 이전 이력은 남아있지 않습니다.',
+      current: '현재',
+      autoRecorded: '자동 기록',
+      noSummary: '요약 없음',
+      compareSelected: '선택한 두 버전 비교',
+      showChanges: '무엇이 바뀌었나',
+      close: '닫기',
+      versionsFailed: '버전 기록을 불러오지 못했습니다.',
+      changedSections: '변경된 부분',
+      noChanges: '두 버전의 내용이 같습니다.',
+      sectionAdded: '추가됨',
+      sectionRemoved: '삭제됨',
+      titleChanged: '제목 변경',
+      unchangedBlocks: '변경 없음 {n}개',
+      diagramLayout: '다이어그램 — 배치만 변경',
+      diagramChanged: '다이어그램 변경',
+      before: '이전',
+      after: '이후',
+      fullVersion: '이 버전 전체 보기',
+      backToChanges: '변경 내용으로 돌아가기',
+      discussSection: '이 부분에 대해 대화 열기',
     },
   };
   const S = STRINGS[CFG.lang] || STRINGS.en;
@@ -120,8 +166,15 @@
   let composerOpen = false;       // the anchorless "new conversation" composer
   let composerDraft = '';         // survives the re-renders polling triggers
   let composerIncludeView = false;
+  let composerContext = null;     // a view pinned by "discuss this section"
   let composerError = '';         // why the last send failed, shown in place
   let initialEtag = null;
+  let versionBtn = null;          // the "Versions" button above the nav tree
+  let versionLatest = null;       // newest recorded version, from /state
+  let versionLoaded = null;       // the version this page's HTML actually is
+  let versionSeen = null;         // newest version the reader has looked at
+  let versionsMod = null;         // assets/versions.js, imported on first use
+  let overlayHash = null;         // the view hash to restore when the overlay closes
   let watched = null;
   let docMeta = null;
   let disconnected = false;
@@ -175,8 +228,6 @@
     });
     content.prepend(crumbs);
     setupNav();
-    window.addEventListener('hashchange', applyHash);
-    applyHash();
   }
 
   function homeId() {
@@ -186,10 +237,14 @@
 
   function applyHash() {
     const m = location.hash.match(/^#\/(.+)$/);
+    const routeId = m ? decodeURIComponent(m[1]) : '';
+    // `~` can't start a view id, so version routes ride the same hash router
+    // the document's own drill-down navigation already uses
+    if (routeId.startsWith('~')) { openVersionRoute(routeId); return; }
+    closeVersions();
     if (m) {
-      const id = decodeURIComponent(m[1]);
-      if (views.has(id)) {
-        activateView(id);
+      if (views.has(routeId)) {
+        activateView(routeId);
         window.scrollTo({ top: 0 });
         return;
       }
@@ -331,6 +386,122 @@
       document.body.classList.remove('ex-nav-open');
     }
   }
+
+  // ---------- version history ----------
+  //
+  // The button, the badge and the routing live here because explain.js is
+  // re-fetched from /assets on every load, so documents generated before this
+  // shipped pick them up too. The list and the diff are a separate module,
+  // imported the first time a reader actually asks for them.
+
+  function setupVersions() {
+    const nav = document.getElementById('ex-nav');
+    if (!nav) return;
+    versionBtn = document.createElement('button');
+    versionBtn.className = 'ex-ver-btn';
+    versionBtn.addEventListener('click', () => { location.hash = '#/~versions'; });
+    nav.prepend(versionBtn);
+    renderVersionBtn();
+  }
+
+  function seenKey() {
+    return `explain:versions-seen:${CFG.slug}`;
+  }
+
+  function storedSeen() {
+    try { return parseInt(localStorage.getItem(seenKey()), 10) || null; } catch { return null; }
+  }
+
+  /* The badge counts versions the reader has not LOOKED at, so it is cleared
+   * by opening the list — not by reloading, which people do without ever
+   * seeing what changed. */
+  function markVersionsSeen(n) {
+    if (!n || (versionSeen && n <= versionSeen)) return;
+    versionSeen = n;
+    try { localStorage.setItem(seenKey(), String(n)); } catch { /* storage unavailable */ }
+    renderVersionBtn();
+  }
+
+  function renderVersionBtn() {
+    if (!versionBtn) return;
+    const unseen = versionLatest && versionSeen ? Math.max(0, versionLatest - versionSeen) : 0;
+    versionBtn.innerHTML =
+      `<span class="ex-ver-btn-label">${esc(S.versions)}</span>` +
+      (versionLatest ? `<span class="ex-ver-chip">v${versionLatest}</span>` : '') +
+      (unseen ? `<span class="ex-ver-badge">${unseen}</span>` : '');
+  }
+
+  /* The overlay lives INSIDE #explain-content: the document's own typography
+   * is written as `#explain-content …` rules, and past versions have to render
+   * in it. `.ex-ui` is what keeps it out of the anchor index (indexable()) and
+   * away from the comment layer. */
+  function ensureOverlay() {
+    let host = document.getElementById('ex-versions');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'ex-versions';
+      host.className = 'ex-ui ex-ver';
+      content.appendChild(host);
+    }
+    return host;
+  }
+
+  function closeVersions() {
+    overlayHash = null;
+    const host = document.getElementById('ex-versions');
+    if (host) host.remove();
+  }
+
+  // closing returns to the view the reader came from, not through history:
+  // list → diff → list leaves a trail that one back step can't undo
+  function leaveVersions() {
+    const back = overlayHash || '';
+    overlayHash = null;
+    location.hash = back;
+    setTimeout(() => {
+      if (document.getElementById('ex-versions') && !/^#\/~/.test(location.hash)) applyHash();
+    }, 0);
+  }
+
+  async function openVersionRoute(routeId) {
+    if (overlayHash === null) overlayHash = /^#\/~/.test(location.hash) ? '' : location.hash;
+    const host = ensureOverlay();
+    if (!versionsMod) {
+      try {
+        versionsMod = await import('/assets/versions.js');
+      } catch {
+        host.innerHTML = `<div class="ex-ver-bar"><h2>${esc(S.versionsTitle)}</h2></div>` +
+          `<div class="ex-banner ex-banner-warn">${esc(S.versionsFailed)}</div>`;
+        return;
+      }
+    }
+    versionsMod.route(host, routeId, HOST);
+  }
+
+  // everything versions.js is allowed to reach back into
+  const HOST = {
+    S,
+    esc,
+    fmtTime,
+    fmt: (tpl, vals) => String(tpl).replace(/\{(\w+)\}/g, (m, k) => (k in vals ? vals[k] : m)),
+    list: () => req('GET', '/versions'),
+    snapshotUrl: (n) => `/${encodeURIComponent(CFG.slug)}/versions/${String(n).padStart(4, '0')}/index.html`,
+    goto: (hash) => { location.hash = hash; },
+    close: leaveVersions,
+    seen: markVersionsSeen,
+    loadedVersion: () => versionLoaded,
+    liveThreads: () => data.threads,
+    openThread: (id) => {
+      leaveVersions();
+      openThread(id);
+      document.body.classList.add('ex-sidebar-open');
+    },
+    discuss: (view, title) => {
+      leaveVersions();
+      openComposer({ view, title });
+      document.body.classList.add('ex-sidebar-open');
+    },
+  };
 
   // ---------- data-example stepper (.ex-steps) ----------
 
@@ -543,7 +714,9 @@
   }
 
   function onMouseUp(e) {
-    if (e.target.closest && (e.target.closest('#ex-sidebar') || e.target.closest('.ex-popover') || e.target.closest('.ex-fab'))) return;
+    // .ex-ui subtrees (breadcrumbs, the version overlay) are absent from the
+    // anchor index, so a selection inside one cannot become an anchor
+    if (e.target.closest && (e.target.closest('#ex-sidebar') || e.target.closest('.ex-popover') || e.target.closest('.ex-fab') || e.target.closest('.ex-ui'))) return;
     setTimeout(() => {
       const sel = window.getSelection();
       if (fab) { fab.remove(); fab = null; }
@@ -726,8 +899,11 @@
 
   function composerHtml() {
     if (!composerOpen) return '';
-    // no views, nothing to include: the whole document is the page
-    const check = views.size
+    // a context pinned from the diff replaces the choice: the reader already
+    // said which section they mean by pressing the button on it
+    const check = composerContext
+      ? `<span class="ex-ctx-chip">${esc((composerContext.title || composerContext.view).slice(0, 40))}</span>`
+      : views.size
       ? `<label class="ex-check"><input type="checkbox" data-act="incl-view"` +
         `${composerIncludeView ? ' checked' : ''}>${esc(S.includePage)}</label>`
       : '';
@@ -769,7 +945,15 @@
     }
     if (disconnected) html += `<div class="ex-banner ex-banner-warn">${esc(S.disconnected)}</div>`;
     if (serverStale) html += `<div class="ex-banner ex-banner-warn">${esc(S.serverStale)}</div>`;
-    if (docUpdated) html += `<div class="ex-banner ex-banner-warn">${esc(S.docUpdated)}<br><button class="ex-btn" data-act="reload-doc">${esc(S.refresh)}</button></div>`;
+    if (docUpdated) {
+      // seeing what changed before reloading is the whole point of the
+      // history — offer it first, where the reader is told about the change
+      const changed = versionLoaded && versionLatest > versionLoaded
+        ? `<button class="ex-btn" data-act="show-changes">${esc(S.showChanges)}</button> `
+        : '';
+      html += `<div class="ex-banner ex-banner-warn">${esc(S.docUpdated)}<br>${changed}` +
+        `<button class="ex-btn" data-act="reload-doc">${esc(S.refresh)}</button></div>`;
+    }
     if (!disconnected) html += `<div class="ex-banner ex-banner-info">${esc(watched ? S.watching : S.notWatching)}</div>`;
 
     if (!data.threads.length) {
@@ -809,9 +993,10 @@
     }
   }
 
-  function openComposer() {
+  function openComposer(ctx) {
     composerOpen = true;
     composerIncludeView = false;
+    composerContext = ctx || null;
     composerError = '';
     render(true);
     const ta = sidebar.querySelector('[data-new]');
@@ -821,6 +1006,7 @@
   function closeComposer() {
     composerOpen = false;
     composerDraft = '';
+    composerContext = null;
     composerError = '';
     render(true);
   }
@@ -830,7 +1016,9 @@
     const body = (ta ? ta.value : composerDraft).trim();
     if (!body) return;
     const payload = { body };
-    if (composerIncludeView && activeView && views.has(activeView)) {
+    if (composerContext) {
+      payload.context = composerContext;
+    } else if (composerIncludeView && activeView && views.has(activeView)) {
       payload.context = { view: activeView, title: views.get(activeView).title };
     }
     composerError = '';
@@ -838,6 +1026,7 @@
       const res = await req('POST', '/threads', payload);
       composerOpen = false;
       composerDraft = '';
+      composerContext = null;
       openId = res.thread.id;
       // forced: on the Cmd+Enter path the composer's textarea still holds
       // focus, and an unforced render would defer until it blurs
@@ -864,6 +1053,11 @@
     const act = actEl.dataset.act;
     // panel-level actions, outside any thread card
     if (act === 'reload-doc') { location.reload(); return; }
+    if (act === 'show-changes') {
+      location.hash = `#/~diff/${versionLoaded}..${versionLatest}`;
+      if (window.innerWidth <= 960) document.body.classList.remove('ex-sidebar-open');
+      return;
+    }
     if (act === 'new-thread') { openComposer(); return; }
     if (act === 'cancel-new') { closeComposer(); return; }
     if (act === 'send-new') { await submitNewThread(); return; }
@@ -922,6 +1116,16 @@
       else if (st.doc_etag !== initialEtag && !docUpdated) { docUpdated = true; render(); }
       if (st.watched !== watched) { watched = st.watched; render(); }
       if (!!st.server_stale !== serverStale) { serverStale = !!st.server_stale; render(); }
+      // the version this page's HTML IS, pinned on the first poll the way
+      // initialEtag is, so "what changed" can compare against what's on screen
+      if (versionLoaded === null) versionLoaded = st.version || null;
+      if (versionSeen === null) markVersionsSeen(st.version);
+      if ((st.version || null) !== versionLatest) {
+        versionLatest = st.version || null;
+        renderVersionBtn();
+        render();
+        if (versionsMod && document.getElementById('ex-versions')) versionsMod.refresh();
+      }
       if (st.rev !== data.rev) await refresh();
     } catch {
       if (!disconnected) { disconnected = true; render(); }
@@ -944,6 +1148,12 @@
 
     setupViews();
     setupSteps();
+    setupVersions();
+    versionSeen = storedSeen();
+    // one router for view ids and version routes alike, wired here rather
+    // than in setupViews so a document without views still reaches the history
+    window.addEventListener('hashchange', applyHash);
+    applyHash();
     content.addEventListener('click', (e) => {
       const g = e.target.closest('[data-goto]');
       if (g && views.has(g.dataset.goto)) {
@@ -967,7 +1177,11 @@
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitNewThread(); }
       if (e.key === 'Escape') closeComposer();
     });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') removeFloating(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      removeFloating();
+      if (document.getElementById('ex-versions')) leaveVersions();
+    });
 
     fetch(`/${encodeURIComponent(CFG.slug)}/doc.json`)
       .then((r) => (r.ok ? r.json() : null))

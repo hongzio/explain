@@ -30,6 +30,10 @@
   --ex-ok: #157347;
   --ex-warn: #96660a;
   --ex-danger: #cd3a45;
+  /* diff tints, kept apart from --ex-mark so "commented on" and "added" can
+     never be mistaken for each other */
+  --ex-add-soft: rgba(21, 115, 71, 0.12);
+  --ex-del-soft: rgba(205, 58, 69, 0.12);
   --ex-shadow:
     0 0 0 1px rgba(9, 12, 20, 0.07),
     0 2px 2px rgba(9, 12, 20, 0.03),
@@ -61,6 +65,8 @@
     --ex-ok: #5fc98b;
     --ex-warn: #dfb35e;
     --ex-danger: #ef8a8a;
+    --ex-add-soft: rgba(95, 201, 139, 0.16);
+    --ex-del-soft: rgba(239, 138, 138, 0.16);
     --ex-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
     --ex-shadow-lg: 0 0 0 1px rgba(255, 255, 255, 0.1), 0 16px 40px -12px rgba(0, 0, 0, 0.6);
   }
@@ -592,3 +598,121 @@ body.ex-index h1 { font-size: 1.5rem; font-weight: 650; letter-spacing: -0.025em
   font-size: 0.72rem; font-weight: 600; padding: 0.06rem 0.55rem;
 }
 .ex-index-empty { color: var(--ex-faint); }
+
+/* ---- version history ---- */
+/* The button sits above the contents tree. The overlay is a CHILD of
+   #explain-content — that is what lends past versions the document's own
+   typography — so its own chrome has to out-specify those `#explain-content h2`
+   style rules, hence the id prefix on everything inside it. */
+.ex-ver-btn {
+  display: flex; align-items: center; gap: 0.4rem; width: 100%;
+  border: 1px solid var(--ex-line); border-radius: 8px;
+  background: var(--ex-surface); color: var(--ex-fg);
+  padding: 0.42rem 0.55rem; margin-bottom: 0.85rem;
+  font-size: 0.78rem; font-weight: 550; cursor: pointer;
+  transition: border-color 0.12s ease-out, background 0.12s ease-out;
+}
+.ex-ver-btn:hover { border-color: var(--ex-line-strong); background: var(--ex-elevated); }
+.ex-ver-btn-label { flex: 1; text-align: left; }
+.ex-ver-chip { color: var(--ex-faint); font-size: 0.72rem; font-variant-numeric: tabular-nums; }
+.ex-ver-badge {
+  background: var(--ex-accent); color: #fff; border-radius: 999px;
+  font-size: 0.66rem; font-weight: 700; padding: 0 0.4rem;
+  min-width: 1.05rem; text-align: center;
+}
+
+#ex-versions {
+  position: fixed; inset: 0 360px 0 0; z-index: 39;
+  background: var(--ex-bg); overflow-y: auto;
+  /* the document is still scrolled behind this; don't hand it the wheel when
+     the overlay reaches its end */
+  overscroll-behavior: contain;
+  padding: 0 2rem 5rem; text-align: left;
+}
+#ex-versions:focus { outline: none; }
+@media (max-width: 960px) { #ex-versions { inset: 0; padding-inline: 1.1rem; } }
+/* strip the document's heading chrome from the overlay's own headings */
+#ex-versions h2, #ex-versions h3, #ex-versions h4, #ex-versions p {
+  border: none; padding: 0; margin: 0;
+}
+#ex-versions .ex-ver-bar {
+  position: sticky; top: 0; z-index: 1;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 0.45rem;
+  background: var(--ex-bg); border-bottom: 1px solid var(--ex-line);
+  padding: 1rem 0 0.8rem; margin-bottom: 1.4rem;
+}
+#ex-versions .ex-ver-bar h2 {
+  font-size: 1.05rem; font-weight: 650; letter-spacing: -0.02em; margin-right: 0.5rem;
+}
+#ex-versions .ex-ver-meta { color: var(--ex-faint); font-size: 0.8rem; margin-bottom: 1.6rem; }
+#ex-versions .ex-ver-commits { margin-left: 0.6rem; }
+#ex-versions .ex-ver-summary { color: var(--ex-fg); font-size: 0.92rem; margin-top: 0.4rem; }
+#ex-versions .ex-ver-note { color: var(--ex-faint); font-size: 0.8rem; margin-top: 0.9rem; }
+#ex-versions .ex-ver-h { font-size: 0.9rem; font-weight: 600; margin: 2rem 0 0.8rem; }
+#ex-versions .ex-btn[disabled] { opacity: 0.45; cursor: default; }
+#ex-versions .ex-btn[disabled]:hover { background: var(--ex-panel); border-color: var(--ex-line); }
+
+#ex-versions .ex-ver-row {
+  display: flex; align-items: center; gap: 0.6rem;
+  border-bottom: 1px solid var(--ex-line); padding: 0.3rem 0;
+}
+#ex-versions .ex-ver-open {
+  flex: 1; display: flex; align-items: baseline; gap: 0.7rem; min-width: 0;
+  border: none; background: none; color: var(--ex-fg);
+  padding: 0.45rem 0.5rem; border-radius: 8px; cursor: pointer; text-align: left;
+}
+#ex-versions .ex-ver-open:hover { background: var(--ex-panel); }
+#ex-versions .ex-ver-num { font-weight: 650; font-variant-numeric: tabular-nums; }
+#ex-versions .ex-ver-when { color: var(--ex-faint); font-size: 0.78rem; white-space: nowrap; }
+#ex-versions .ex-ver-sum {
+  font-size: 0.88rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#ex-versions .ex-ver-nosum { color: var(--ex-faint); font-style: italic; }
+#ex-versions .ex-ver-chips { display: flex; align-items: center; gap: 0.35rem; flex-shrink: 0; }
+#ex-versions .ex-chip-auto { color: var(--ex-faint); }
+#ex-versions .ex-chip-add { color: var(--ex-ok); background: var(--ex-add-soft); }
+#ex-versions .ex-chip-del { color: var(--ex-danger); background: var(--ex-del-soft); }
+#ex-versions .ex-ver-thread {
+  border: 1px solid var(--ex-line); border-radius: 999px;
+  background: var(--ex-surface); color: var(--ex-muted);
+  font-size: 0.7rem; padding: 0.12rem 0.55rem; cursor: pointer; max-width: 16rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#ex-versions .ex-ver-thread:hover { color: var(--ex-fg); border-color: var(--ex-line-strong); }
+
+#ex-versions .ex-ver-sec { border-top: 1px solid var(--ex-line); padding-top: 1rem; margin-bottom: 2.2rem; }
+#ex-versions .ex-ver-sec-head {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.8rem;
+}
+#ex-versions .ex-ver-sec-head h4 { font-size: 0.95rem; font-weight: 650; letter-spacing: -0.01em; }
+#ex-versions .ex-ver-sec-head .ex-btn-ghost:hover { color: var(--ex-accent); }
+#ex-versions .ex-ver-skip { color: var(--ex-faint); font-size: 0.75rem; margin: 0.6rem 0; }
+#ex-versions .ex-ver-label {
+  color: var(--ex-faint); font-size: 0.7rem; letter-spacing: 0.05em;
+  text-transform: uppercase; margin-bottom: 0.35rem;
+}
+#ex-versions .ex-ver-block {
+  border-left: 2px solid var(--ex-line); border-radius: 0 6px 6px 0;
+  padding: 0.45rem 0.6rem 0.45rem 0.85rem; margin: 0.7rem 0;
+}
+#ex-versions .ex-ver-add { border-left-color: var(--ex-ok); background: var(--ex-add-soft); }
+#ex-versions .ex-ver-del { border-left-color: var(--ex-danger); background: var(--ex-del-soft); }
+#ex-versions .ex-ver-del .ex-ver-slot { opacity: 0.75; }
+#ex-versions .ex-ver-mod { border-left-color: var(--ex-accent); }
+#ex-versions .ex-ver-minor > summary { color: var(--ex-faint); font-size: 0.78rem; cursor: pointer; }
+#ex-versions .ex-ver-ba { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; align-items: start; }
+@media (max-width: 780px) { #ex-versions .ex-ver-ba { grid-template-columns: 1fr; } }
+
+#ex-versions del { background: var(--ex-del-soft); color: var(--ex-danger); text-decoration: line-through; }
+#ex-versions ins { background: var(--ex-add-soft); color: var(--ex-ok); text-decoration: none; }
+#ex-versions .ex-ver-lines { white-space: pre; }
+#ex-versions .ex-ver-lines > * { display: block; background: none; }
+#ex-versions .ex-ver-lines > del { background: var(--ex-del-soft); }
+#ex-versions .ex-ver-lines > ins { background: var(--ex-add-soft); }
+
+/* previews are imported from another document: readable, not operable */
+#ex-versions .ex-ver-ba .ex-ver-slot, #ex-versions .ex-ver-block > .ex-ver-slot { pointer-events: none; }
+#ex-versions svg { max-width: 100%; height: auto; }
+#ex-versions figure { margin: 0.4rem 0; }
+#ex-versions .ex-ver-full { max-width: 52rem; }
+#ex-versions .ex-ver-full p { margin: 0.75rem 0; }
