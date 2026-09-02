@@ -25,6 +25,7 @@
       newConversation: 'New conversation',
       newPlaceholder: 'Ask anything about this document…',
       includePage: 'Include current page',
+      sendFailed: "Couldn't post this.",
       placeholder: 'Leave a comment on the selected text…',
       replyPlaceholder: 'Reply…',
       send: 'Send',
@@ -64,6 +65,7 @@
       newConversation: '새 대화',
       newPlaceholder: '이 문서에 대해 무엇이든 물어보세요…',
       includePage: '현재 페이지 포함',
+      sendFailed: '등록하지 못했습니다.',
       placeholder: '선택한 부분에 댓글을 남겨보세요…',
       replyPlaceholder: '답글…',
       send: '등록',
@@ -116,6 +118,7 @@
   let composerOpen = false;       // the anchorless "new conversation" composer
   let composerDraft = '';         // survives the re-renders polling triggers
   let composerIncludeView = false;
+  let composerError = '';         // why the last send failed, shown in place
   let initialEtag = null;
   let watched = null;
   let docMeta = null;
@@ -131,7 +134,13 @@
       headers: body ? { 'Content-Type': 'application/json' } : undefined,
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (!res.ok) throw new Error(`${method} ${path}: ${res.status}`);
+    if (!res.ok) {
+      // carry the API's own message: a version-skewed daemon says exactly
+      // what it rejected, which is the whole diagnosis
+      let detail = '';
+      try { detail = (await res.json()).error || ''; } catch { /* not JSON */ }
+      throw new Error(detail || `${method} ${path}: ${res.status}`);
+    }
     return res.json();
   }
 
@@ -719,8 +728,12 @@
       ? `<label class="ex-check"><input type="checkbox" data-act="incl-view"` +
         `${composerIncludeView ? ' checked' : ''}>${esc(S.includePage)}</label>`
       : '';
+    const err = composerError
+      ? `<div class="ex-composer-error">${esc(composerError)}</div>`
+      : '';
     return `<div class="ex-composer">` +
       `<textarea data-new placeholder="${esc(S.newPlaceholder)}">${esc(composerDraft)}</textarea>` +
+      err +
       `<div class="ex-composer-actions">${check}<span class="ex-spacer"></span>` +
       `<button class="ex-btn" data-act="cancel-new">${esc(S.cancel)}</button>` +
       `<button class="ex-btn ex-btn-primary" data-act="send-new">${esc(S.send)}</button>` +
@@ -795,6 +808,7 @@
   function openComposer() {
     composerOpen = true;
     composerIncludeView = false;
+    composerError = '';
     render(true);
     const ta = sidebar.querySelector('[data-new]');
     if (ta) ta.focus();
@@ -803,6 +817,7 @@
   function closeComposer() {
     composerOpen = false;
     composerDraft = '';
+    composerError = '';
     render(true);
   }
 
@@ -814,6 +829,7 @@
     if (composerIncludeView && activeView && views.has(activeView)) {
       payload.context = { view: activeView, title: views.get(activeView).title };
     }
+    composerError = '';
     try {
       const res = await req('POST', '/threads', payload);
       composerOpen = false;
@@ -822,7 +838,12 @@
       // forced: on the Cmd+Enter path the composer's textarea still holds
       // focus, and an unforced render would defer until it blurs
       await refresh(true);
-    } catch { /* keep the composer so the draft isn't lost */ }
+    } catch (e) {
+      // keep the composer so the draft isn't lost, and SAY why: a silent
+      // failure here reads as a dead button
+      composerError = S.sendFailed + (e && e.message ? ` (${e.message})` : '');
+      render(true);
+    }
   }
 
   async function onSidebarClick(e) {

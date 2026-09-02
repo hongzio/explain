@@ -474,6 +474,10 @@ html[lang="ko"] pre.ex-data[data-verified="executed"]::after { content: "✓ 실
 }
 .ex-new-btn { flex: none; font-size: 0.72rem; padding: 0.22rem 0.6rem; }
 .ex-composer { margin-top: 0.6rem; }
+.ex-composer-error {
+  color: var(--ex-danger); font-size: 0.72rem; line-height: 1.5;
+  margin-top: 0.45rem; overflow-wrap: anywhere;
+}
 .ex-composer-actions { display: flex; align-items: center; gap: 0.45rem; margin-top: 0.55rem; }
 .ex-check {
   display: inline-flex; align-items: center; gap: 0.35rem;
