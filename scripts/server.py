@@ -16,6 +16,7 @@ Commands:
 """
 
 import argparse
+import hashlib
 import json
 import mimetypes
 import os
@@ -51,6 +52,42 @@ API_DOC_RE = re.compile(r"^/api/docs/([^/]+)(/.*)?$")
 
 VALID_AUTHORS = {"user", "agent"}
 MAX_FIELD = 4000
+
+
+SOURCE_PATH = Path(__file__).resolve()
+
+
+def source_digest() -> str:
+    """This file's bytes on disk, digested — cached against its stat stamp so
+    the steady state is a single stat() call.
+
+    Assets are re-read from disk on every request but this module is only
+    loaded when the daemon starts, so an updated skill leaves a running
+    daemon serving a newer page than its own API understands. Comparing the
+    digest a process started with against the file now on disk is how the
+    page and the watcher notice.
+    """
+    try:
+        st = SOURCE_PATH.stat()
+        stamp = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return "unknown"
+    cached = getattr(source_digest, "cache", None)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    try:
+        digest = hashlib.sha256(SOURCE_PATH.read_bytes()).hexdigest()[:12]
+    except OSError:
+        return "unknown"
+    source_digest.cache = (stamp, digest)
+    return digest
+
+
+RUNNING_DIGEST = source_digest()  # the code THIS process actually loaded
+
+
+def server_stale() -> bool:
+    return source_digest() != RUNNING_DIGEST
 
 
 def now_iso() -> str:
@@ -280,7 +317,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_api(self, method: str, path: str) -> None:
         if path == "/api/ping" and method == "GET":
-            self.send_json(200, {"ok": True, "root": str(STORE.root), "pid": os.getpid()})
+            self.send_json(
+                200,
+                {
+                    "ok": True,
+                    "root": str(STORE.root),
+                    "pid": os.getpid(),
+                    "source": RUNNING_DIGEST,
+                    "stale": server_stale(),
+                },
+            )
             return
         if path == "/api/docs" and method == "GET":
             docs = STORE.docs()
@@ -315,6 +361,7 @@ class Handler(BaseHTTPRequestHandler):
                     "doc_etag": STORE.doc_etag(slug),
                     "watched": STORE.lease_fresh(slug),
                     "unseen_for_user": unseen,
+                    "server_stale": server_stale(),
                 },
             )
             return
@@ -559,7 +606,13 @@ def cmd_serve(args) -> int:
     port = httpd.server_address[1]
     write_json_atomic(
         server_json_path(root),
-        {"port": port, "pid": os.getpid(), "root": str(root), "url": f"http://127.0.0.1:{port}"},
+        {
+            "port": port,
+            "pid": os.getpid(),
+            "root": str(root),
+            "url": f"http://127.0.0.1:{port}",
+            "source": RUNNING_DIGEST,
+        },
     )
 
     def cleanup(*_):
@@ -619,6 +672,22 @@ def cmd_start(args) -> int:
     root.mkdir(parents=True, exist_ok=True)
 
     info = running_server(root)
+    # a daemon that predates a change to this file keeps serving the old API
+    # under a page that reloaded from disk; starting is the natural moment to
+    # retire it, which also makes `start` the single fix for both stale and dead
+    restarted = False
+    if info is not None and info.get("source") != RUNNING_DIGEST:
+        try:
+            os.kill(info["pid"], signal.SIGTERM)
+            for _ in range(20):
+                if not alive(info["pid"]):
+                    break
+                time.sleep(0.1)
+        except OSError:
+            pass
+        info = None
+        restarted = True
+
     already = info is not None
     if info is None:
         port = preferred_port(root)
@@ -641,7 +710,13 @@ def cmd_start(args) -> int:
             return 1
 
     url = info["url"] + (f"/{args.doc}/" if args.doc else "/")
-    result = {"url": url, "port": info["port"], "pid": info["pid"], "already_running": already}
+    result = {
+        "url": url,
+        "port": info["port"],
+        "pid": info["pid"],
+        "already_running": already,
+        "restarted_stale": restarted,
+    }
     if args.open:
         try:
             result["opened"] = bool(webbrowser.open(url))

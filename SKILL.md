@@ -223,10 +223,18 @@ only eyes catch layout.
 python3 "SKILL_DIR/scripts/server.py" start --root "PROJECT/.explain" --open --doc <slug>
 ```
 
-Prints JSON: `{"url", "port", "pid", "already_running", "opened"}`. The server
-is one-per-project, binds 127.0.0.1 only (port derived from the project path,
-so it's stable), is idempotent to start, and shuts itself down when no
-session lease is fresh and no HTTP request has arrived for a few minutes.
+Prints JSON: `{"url", "port", "pid", "already_running", "restarted_stale",
+"opened"}`. The server is one-per-project, binds 127.0.0.1 only (port derived
+from the project path, so it's stable), is idempotent to start, and shuts
+itself down when no session lease is fresh and no HTTP request has arrived
+for a few minutes.
+
+Assets are re-read from disk on every request, but `server.py` is only loaded
+when the daemon starts — so after the skill is updated, a daemon left running
+from before serves the new page against its own old API. `start` detects that
+(the daemon stamps its source digest into `server.json`) and replaces it,
+reporting `restarted_stale: true`; the page shows a banner and the watcher
+fires `server_stale` meanwhile. You do not need to `stop` first.
 
 **Always show the URL to the user in chat.** Browser opening is best-effort —
 in sandboxed environments (e.g. Codex) it may fail or need approval; the URL
@@ -255,6 +263,7 @@ docs. It exits printing a sentinel when you're needed:
 |---|---|---|
 | `EXPLAIN_EVENT unread <slug>` | 0 | handle unread threads in that doc (§6), then relaunch the watcher |
 | `EXPLAIN_EVENT server_dead` | 2 | rerun `server.py start`, then relaunch the watcher |
+| `EXPLAIN_EVENT server_stale` | 5 | same: rerun `server.py start` (it retires the old daemon itself), then relaunch the watcher |
 | `EXPLAIN_EVENT lease_lost <slug>` + exit 3 | 3 | another session took over — stop watching (all docs lost) |
 | `EXPLAIN_EVENT timeout` | 4 | only with `--timeout`; relaunch if still watching |
 
@@ -335,7 +344,7 @@ Base: `<url>/api/docs/<slug>`
 
 | Method & path | Body | Effect |
 |---|---|---|
-| GET `/state` | — | `{rev, doc_etag, watched, unseen_for_user}` |
+| GET `/state` | — | `{rev, doc_etag, watched, unseen_for_user, server_stale}` |
 | GET `/comments` | — | full comment data `{rev, threads:[…]}` |
 | POST `/threads` | `{body, anchor?:{exact,prefix,suffix}, context?:{view,title}, author?}` | new thread (user → `unread`); no `anchor` → document-level |
 | POST `/threads/<tid>/messages` | `{author, body}` | reply; user → `unread`, agent → `answered` |

@@ -7,6 +7,8 @@ exits with a sentinel line on stdout when something needs the agent:
 
   EXPLAIN_EVENT unread <slug>     exit 0   unread comment(s) — fetch, reply, relaunch
   EXPLAIN_EVENT server_dead       exit 2   restart the server, then relaunch
+  EXPLAIN_EVENT server_stale      exit 5   server.py changed since the daemon
+                                           started — restart it, then relaunch
   EXPLAIN_EVENT lease_lost <slug> (info)   another session took this doc over
   (all leases lost)               exit 3   stop watching entirely
   EXPLAIN_EVENT timeout           exit 4   --timeout elapsed, nothing happened
@@ -15,11 +17,14 @@ stdlib only. Python 3.11+.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 import time
 from pathlib import Path
+
+SERVER_PATH = Path(__file__).resolve().parent / "server.py"
 
 
 def emit(*parts) -> None:
@@ -49,6 +54,16 @@ def alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def server_digest() -> str:
+    """server.py's bytes on disk, digested the same way server.py stamps
+    itself into server.json — a mismatch means the daemon is running code
+    that has since been replaced."""
+    try:
+        return hashlib.sha256(SERVER_PATH.read_bytes()).hexdigest()[:12]
+    except OSError:
+        return "unknown"
 
 
 def has_unread(comments: dict) -> bool:
@@ -127,6 +142,11 @@ def main() -> int:
             if not info.get("pid") or not alive(info["pid"]):
                 emit("server_dead")
                 return 2
+            # same remedy as server_dead, but the daemon is alive and wrong
+            # rather than gone: the page has already reloaded newer assets
+            if info.get("source") != server_digest():
+                emit("server_stale")
+                return 5
             last_srv = now
 
         fired = False

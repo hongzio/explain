@@ -47,6 +47,7 @@
       watching: 'An agent session is watching this document.',
       notWatching: 'No agent is watching right now — comments will be answered when a session resumes.',
       docUpdated: 'This document was updated.',
+      serverStale: 'The server is running older code than this page — ask the session to restart it.',
       refresh: 'Reload',
       disconnected: 'Server unreachable — it may have shut down. Comments are read-only until a session restarts it.',
       confirmDelete: 'Delete this?',
@@ -87,6 +88,7 @@
       watching: '에이전트 세션이 이 문서를 감시하고 있습니다.',
       notWatching: '지금은 감시 중인 에이전트가 없습니다 — 다음 세션이 이어받을 때 답변됩니다.',
       docUpdated: '문서가 갱신되었습니다.',
+      serverStale: '서버가 이 페이지보다 오래된 코드로 실행 중입니다 — 세션에 재시작을 요청하세요.',
       refresh: '새로고침',
       disconnected: '서버에 연결할 수 없습니다 — 종료된 것 같습니다. 세션이 재시작할 때까지 읽기 전용입니다.',
       confirmDelete: '삭제할까요?',
@@ -124,6 +126,7 @@
   let docMeta = null;
   let disconnected = false;
   let docUpdated = false;
+  let serverStale = false;        // daemon predates the assets it is serving
   let renderPending = false;
 
   // ---------- API ----------
@@ -765,6 +768,7 @@
       html += `<div class="ex-side-meta">${esc(S.generatedFrom)} ${commit}${esc(fmtTime(docMeta.updated_at || docMeta.created_at))}</div>`;
     }
     if (disconnected) html += `<div class="ex-banner ex-banner-warn">${esc(S.disconnected)}</div>`;
+    if (serverStale) html += `<div class="ex-banner ex-banner-warn">${esc(S.serverStale)}</div>`;
     if (docUpdated) html += `<div class="ex-banner ex-banner-warn">${esc(S.docUpdated)}<br><button class="ex-btn" data-act="reload-doc">${esc(S.refresh)}</button></div>`;
     if (!disconnected) html += `<div class="ex-banner ex-banner-info">${esc(watched ? S.watching : S.notWatching)}</div>`;
 
@@ -917,6 +921,7 @@
       if (initialEtag === null) initialEtag = st.doc_etag;
       else if (st.doc_etag !== initialEtag && !docUpdated) { docUpdated = true; render(); }
       if (st.watched !== watched) { watched = st.watched; render(); }
+      if (!!st.server_stale !== serverStale) { serverStale = !!st.server_stale; render(); }
       if (st.rev !== data.rev) await refresh();
     } catch {
       if (!disconnected) { disconnected = true; render(); }
