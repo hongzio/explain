@@ -27,6 +27,10 @@
   --ex-accent-soft: rgba(94, 106, 210, 0.11);
   --ex-mark: rgba(255, 193, 7, 0.28);
   --ex-mark-active: rgba(255, 193, 7, 0.55);
+  /* search marks take the accent hue so they can never be misread as the
+     amber "someone commented here" — the two are often lit at once */
+  --ex-find: rgba(94, 106, 210, 0.18);
+  --ex-find-active: rgba(94, 106, 210, 0.45);
   --ex-ok: #157347;
   --ex-warn: #96660a;
   --ex-danger: #cd3a45;
@@ -62,6 +66,8 @@
     --ex-accent-soft: rgba(94, 106, 210, 0.18);
     --ex-mark: rgba(255, 203, 92, 0.24);
     --ex-mark-active: rgba(255, 203, 92, 0.45);
+    --ex-find: rgba(130, 143, 255, 0.22);
+    --ex-find-active: rgba(130, 143, 255, 0.48);
     --ex-ok: #5fc98b;
     --ex-warn: #dfb35e;
     --ex-danger: #ef8a8a;
@@ -289,7 +295,7 @@ body.ex-has-nav #ex-nav {
 }
 .ex-crumbs {
   position: sticky; top: 0; z-index: 10;
-  display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem;
+  display: flex; align-items: center; gap: 0.4rem;
   margin: -2rem -2.25rem 1.8rem; padding: 0.85rem 2.25rem;
   font-size: 0.8125rem; font-weight: 500; color: var(--ex-faint);
   background: color-mix(in srgb, var(--ex-bg) 80%, transparent);
@@ -297,9 +303,25 @@ body.ex-has-nav #ex-nav {
   -webkit-backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--ex-line);
 }
+/* the half activateView() rewrites; the search control is its sibling so an
+   open query survives navigation */
+/* Never wraps. Wrapping made the sticky bar grow a line every time the search
+   box opened and squeezed the trail — and would do the same on its own once a
+   view path got long enough. Breadcrumbs truncate instead. */
+.ex-crumb-trail {
+  display: flex; flex-wrap: nowrap; align-items: center; gap: 0.4rem;
+  min-width: 0; flex: 1 1 auto; overflow: hidden;
+}
 .ex-crumbs a { color: var(--ex-muted); text-decoration: none; transition: color 0.12s ease-out; }
 .ex-crumbs a:hover { color: var(--ex-accent); }
-.ex-crumb-here { color: var(--ex-fg); }
+/* ancestors and separators keep their size; the current view gives way first,
+   since its name is repeated in the heading below and in the nav tree */
+.ex-crumbs a, .ex-crumb-sep { flex: none; white-space: nowrap; }
+.ex-crumb-here {
+  color: var(--ex-fg);
+  min-width: 0; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
 .ex-crumb-sep { opacity: 0.45; }
 
 /* drill-down affordances */
@@ -413,6 +435,117 @@ html[lang="ko"] pre.ex-data[data-verified="executed"]::after { content: "✓ 실
 /* ---- comment highlights (CSS Custom Highlight API) ---- */
 ::highlight(ex-hl) { background-color: var(--ex-mark); }
 ::highlight(ex-hl-active) { background-color: var(--ex-mark-active); }
+/* search rides above those (priority set in JS): every hit faintly, the one
+   jumped to hard, so the page shows both where the matches are and which
+   one you are standing on */
+::highlight(ex-search) { background-color: var(--ex-find); }
+::highlight(ex-search-current) { background-color: var(--ex-find-active); color: var(--ex-fg); }
+
+/* ---- search ---- */
+/* Shrinkable, so a long breadcrumb and an open box share the squeeze instead
+   of the trail absorbing all of it; the floor keeps the button intact. */
+.ex-search {
+  position: relative; flex: 0 1 auto; min-width: 1.75rem; margin-left: auto;
+  display: flex; flex-direction: row-reverse; align-items: center; gap: 0.3rem;
+}
+.ex-search-btn {
+  flex: none; position: relative;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.75rem; height: 1.75rem;
+  border: none; background: none; color: var(--ex-faint);
+  border-radius: 6px; cursor: pointer; padding: 0;
+  transition: color 0.12s ease-out, background 0.12s ease-out;
+}
+.ex-search-btn:hover { color: var(--ex-fg); background: var(--ex-line); }
+.ex-search-open .ex-search-btn, .ex-search-btn.ex-search-has { color: var(--ex-accent); }
+.ex-search-badge {
+  position: absolute; top: -0.1rem; right: -0.2rem;
+  min-width: 1rem; padding: 0 0.2rem;
+  font-size: 0.6rem; font-weight: 600; line-height: 1rem; text-align: center;
+  color: var(--ex-bg); background: var(--ex-accent);
+  border-radius: 999px;
+}
+/* only worth showing once the list is folded away — while it is open the
+   count line says the same thing, and the badge just sits on the glyph */
+.ex-search-badge:empty, .ex-search-open .ex-search-badge { display: none; }
+/* results computed against a document that has since been rewritten */
+.ex-search-stale .ex-search-badge { background: var(--ex-warn); }
+.ex-search-btn.ex-search-stale { color: var(--ex-warn); }
+/* collapsed to nothing rather than hidden, so it grows leftward out of the
+   button instead of reflowing the breadcrumbs when it appears */
+.ex-search-input {
+  /* same height as the button, or opening the box makes the sticky bar
+     taller by the difference */
+  width: 0; min-width: 0; height: 1.75rem; padding: 0; opacity: 0;
+  border: 1px solid transparent; border-radius: 7px;
+  background: var(--ex-surface); color: var(--ex-fg);
+  font-size: 0.8rem; line-height: 1.4;
+  /* border-color belongs here too: left out, it snapped away instantly while
+     the box took 160ms to shrink, which reads as "the first Escape only
+     removed the border" */
+  transition: width 0.16s ease-out, opacity 0.12s ease-out, padding 0.16s ease-out,
+    border-color 0.16s ease-out;
+}
+.ex-search-open .ex-search-input {
+  /* 15rem is the target, 7rem the point below which typing is pointless —
+     between them the box gives ground to the breadcrumb */
+  width: 15rem; min-width: 7rem; opacity: 1; padding: 0.32rem 0.6rem;
+  border-color: var(--ex-line-strong);
+}
+.ex-search-input:focus { outline: none; }
+.ex-search-open .ex-search-input:focus-visible {
+  box-shadow: 0 0 0 2px var(--ex-bg), 0 0 0 4px var(--ex-accent);
+}
+@media (prefers-reduced-motion: reduce) { .ex-search-input { transition: none; } }
+
+.ex-search-panel {
+  position: absolute; top: calc(100% + 0.6rem); right: 0; z-index: 60;
+  width: min(34rem, 80vw); max-height: min(26rem, 60vh); overflow-y: auto;
+  padding: 0.35rem;
+  background: var(--ex-elevated); border: 1px solid var(--ex-line);
+  border-radius: 10px; box-shadow: var(--ex-shadow-lg);
+  font-weight: 400;
+}
+.ex-search-panel[hidden] { display: none; }
+.ex-search-dim { opacity: 0.55; }
+.ex-search-count, .ex-search-empty {
+  padding: 0.35rem 0.6rem; font-size: 0.7rem; color: var(--ex-faint);
+}
+.ex-search-warn {
+  padding: 0.35rem 0.6rem; font-size: 0.72rem; color: var(--ex-warn);
+}
+.ex-search-group {
+  position: sticky; top: 0; z-index: 1;
+  padding: 0.4rem 0.6rem 0.25rem;
+  font-size: 0.68rem; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--ex-muted); background: var(--ex-elevated);
+}
+.ex-search-hit {
+  display: block; width: 100%; text-align: left;
+  padding: 0.4rem 0.6rem; margin-bottom: 0.1rem;
+  border: none; border-radius: 7px; background: none; cursor: pointer;
+  color: var(--ex-muted); font-size: 0.79rem; line-height: 1.55;
+  transition: background 0.12s ease-out, color 0.12s ease-out;
+}
+.ex-search-hit:hover { background: var(--ex-panel); color: var(--ex-fg); }
+.ex-search-hit-current { background: var(--ex-accent-soft); color: var(--ex-fg); }
+/* two lines, then clipped: a merged chunk grows the window, not the row */
+.ex-search-preview {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; overflow-wrap: anywhere;
+}
+.ex-search-preview mark {
+  background: var(--ex-find-active); color: var(--ex-fg);
+  border-radius: 2px; padding: 0 0.1em;
+}
+/* narrow: there is no room for a trail and a box, so the box takes the bar
+   for as long as it is open and the breadcrumbs come back on close */
+@media (max-width: 960px) {
+  body.ex-searching .ex-crumb-trail { display: none; }
+  body.ex-searching .ex-search { flex: 1 1 auto; margin-left: 0; }
+  body.ex-searching .ex-search-open .ex-search-input { width: 100%; }
+  .ex-search-panel { width: min(34rem, 92vw); }
+}
 
 /* ---- floating add-comment button + popover ---- */
 .ex-fab {

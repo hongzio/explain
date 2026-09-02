@@ -124,6 +124,9 @@ sentences; a view should fit in roughly two screens.
 Exactly one view has no `data-parent` — that's the home view. Breadcrumbs and
 a collapsible left sidebar listing the whole view tree render automatically,
 both labelled from `data-title`, so keep those labels short and meaningful.
+Search (the magnifier at the right of the breadcrumb bar) reads the whole
+document, hidden views included, and labels every result with that same
+`data-title` path — so a vague label costs the reader twice.
 Navigate with `<a href="#/id">` or `data-goto="id"` on any element (including
 SVG nodes wrapped in `<a href="#/id">`).
 
@@ -201,7 +204,7 @@ wide trees, left-to-right for deep chains, and prefer a **task-scoped
 trace** (one flow, its actual call path) over a whole-repo map — whole-repo
 graphs overwhelm and mislead.
 
-**Toolbox summary**: views + breadcrumbs + hierarchy sidebar, clickable
+**Toolbox summary**: views + breadcrumbs + hierarchy sidebar + search, clickable
 SVG/cards, `.ex-steps`,
 `.ex-walkthrough`, `<details>`, tables. These are plain HTML conventions
 that `assets/explain.js` enhances — write no `<script>` of your own, and no

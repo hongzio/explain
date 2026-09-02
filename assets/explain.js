@@ -82,6 +82,14 @@
       fullVersion: 'View this whole version',
       backToChanges: 'Back to changes',
       discussSection: 'Discuss this section',
+      search: 'Search',
+      searchPlaceholder: 'Search this document…',
+      searchNoResults: 'No matches.',
+      searchCount: '{n} matches in {m} places',
+      searchCountOnePlace: '{n} matches in 1 place',
+      searchCountOne: '1 match',
+      searchMore: '{n} more not shown',
+      searchStale: 'The document changed — search again.',
     },
     ko: {
       panelTitle: '대화',
@@ -146,6 +154,14 @@
       fullVersion: '이 버전 전체 보기',
       backToChanges: '변경 내용으로 돌아가기',
       discussSection: '이 부분에 대해 대화 열기',
+      search: '검색',
+      searchPlaceholder: '이 문서에서 찾기…',
+      searchNoResults: '결과가 없습니다.',
+      searchCount: '{n}건 · {m}곳',
+      searchCountOnePlace: '{n}건 · 1곳',
+      searchCountOne: '1건',
+      searchMore: '외 {n}건 더',
+      searchStale: '문서가 바뀌었습니다 — 다시 검색하세요.',
     },
   };
   const S = STRINGS[CFG.lang] || STRINGS.en;
@@ -158,6 +174,7 @@
   let views = new Map();          // viewId -> {el, title, parent}
   let activeView = null;
   let crumbs = null;
+  let crumbTrail = null;          // the half of the bar activateView() rewrites
   let navTree = null;             // the left hierarchy sidebar's <nav>
   const navCollapsed = new Set(); // view ids whose children are folded away
   let ranges = new Map();         // threadId -> Range|null
@@ -181,6 +198,21 @@
   let docUpdated = false;
   let serverStale = false;        // daemon predates the assets it is serving
   let renderPending = false;
+
+  // search: the box lives in the breadcrumb bar, results in a dropdown under it
+  let searchBox = null, searchBtn = null, searchInput = null, searchPanel = null;
+  let searchIdx = null;           // {text, lower, map} — see buildSearchIndex
+  let viewSpans = null;           // viewId -> {from, to} in collapsed space
+  let searchOpen = false;         // the input is expanded
+  let searchListOpen = false;     // the results dropdown is showing
+  let searchQuery = '';           // the query the results on screen are for
+  let searchHits = [];            // [{from, to}] collapsed offsets, in doc order
+  let searchChunks = [];          // preview groups, same order as searchHits
+  let searchCurrent = -1;         // index into searchHits, or -1
+  let searchTruncated = 0;        // hits dropped by SEARCH_MAX
+  let searchStale = false;        // the file moved on since these results
+  let searchEtag = null;          // the doc_etag the results were computed against
+  let lastEtag = null;            // newest doc_etag the poll has seen
 
   // ---------- API ----------
 
@@ -210,7 +242,6 @@
 
   function setupViews() {
     const els = content.querySelectorAll('[data-view]');
-    if (!els.length) return;
     for (const el of els) {
       const id = el.dataset.view;
       const heading = el.querySelector('h1,h2,h3');
@@ -220,14 +251,21 @@
         parent: el.dataset.parent || null,
       });
     }
+    // The bar is built even for a document with no views, because search hangs
+    // off it and a single-view document is still worth searching. It splits in
+    // two: activateView() rewrites the trail's innerHTML on every navigation,
+    // so the search control has to be a sibling that survives that.
     crumbs = document.createElement('nav');
     crumbs.className = 'ex-crumbs ex-ui';
-    // delegated: activateView() rewrites the bar's innerHTML on every navigation
-    crumbs.addEventListener('click', (e) => {
+    crumbTrail = document.createElement('div');
+    crumbTrail.className = 'ex-crumb-trail';
+    crumbTrail.addEventListener('click', (e) => {
       if (e.target.closest('[data-act="toggle-nav"]')) toggleNav();
     });
+    crumbs.appendChild(crumbTrail);
+    crumbs.appendChild(buildSearchControl());
     content.prepend(crumbs);
-    setupNav();
+    if (els.length) setupNav();
   }
 
   function homeId() {
@@ -270,7 +308,7 @@
     const trail = [];
     for (let cur = id; cur; cur = (views.get(cur) || {}).parent) trail.unshift(cur);
     if (trail[0] !== homeId()) trail.unshift(homeId());
-    crumbs.innerHTML =
+    crumbTrail.innerHTML =
       `<button class="ex-nav-toggle" data-act="toggle-nav" title="${esc(S.toggleNav)}"` +
       ` aria-label="${esc(S.toggleNav)}">☰</button>` +
       trail
@@ -690,6 +728,8 @@
     }
     CSS.highlights.set('ex-hl', normal);
     CSS.highlights.set('ex-hl-active', active);
+    // repainted here so navigation, which repaints comments, can't drop them
+    paintSearch();
   }
 
   function caretFromPoint(x, y) {
@@ -702,6 +742,475 @@
       return r ? { node: r.startContainer, offset: r.startOffset } : null;
     }
     return null;
+  }
+
+  // ---------- search ----------
+
+  /* Search runs entirely in the browser over the same concatenated text the
+   * comment anchors use, so it reaches every view — including the ones the
+   * drill-down router is currently hiding — without a server round trip.
+   *
+   * It works in "collapsed space": the document text with each run of
+   * whitespace squeezed to a single space. Padding counted there is the
+   * padding the reader actually sees in a preview, and `map` carries every
+   * collapsed character back to its offset in idx.text so a hit can still
+   * become a DOM Range. */
+
+  const SEARCH_PAD = 40;   // collapsed characters of context on each side
+  const SEARCH_GAP = 40;   // hits closer than this share one preview
+  const SEARCH_MAX = 200;  // hits kept; the rest are reported, never dropped silently
+
+  const WS = /\s/;  // JS \s already covers NBSP, which diagrams and tables use
+
+  function buildSearchIndex() {
+    const raw = idx.text;
+    const out = [];
+    const map = [];
+    let prevSpace = false;
+    for (let i = 0; i < raw.length; i++) {
+      const c = raw[i];
+      if (WS.test(c)) {
+        if (prevSpace || !out.length) continue;
+        out.push(' '); map.push(i); prevSpace = true;
+        continue;
+      }
+      out.push(c); map.push(i); prevSpace = false;
+    }
+    const text = out.join('');
+    searchIdx = { text, lower: lowerAligned(text), map };
+    viewSpans = null;
+  }
+
+  // toLowerCase() can change a string's length (İ becomes two code points),
+  // which would slide every offset after it; leave those characters alone.
+  function lowerAligned(s) {
+    let out = '';
+    for (const c of s) {
+      const l = c.toLowerCase();
+      out += l.length === c.length ? l : c;
+    }
+    return out;
+  }
+
+  function typingTarget(el) {
+    if (!el || !el.tagName) return false;
+    return el.isContentEditable || el.tagName === 'INPUT' ||
+      el.tagName === 'TEXTAREA' || el.tagName === 'SELECT';
+  }
+
+  function collapseQuery(q) {
+    return String(q).replace(/\s+/g, ' ').trim();
+  }
+
+  // first collapsed index at or after a raw idx.text offset
+  function rawToCollapsed(pos) {
+    const m = searchIdx.map;
+    let lo = 0, hi = m.length - 1, ans = m.length;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (m[mid] >= pos) { ans = mid; hi = mid - 1; } else lo = mid + 1;
+    }
+    return ans;
+  }
+
+  /* Preview windows are clamped to the view a hit lives in: padding that ran
+   * past the edge would splice in the opening sentence of an unrelated
+   * section. At an edge the padding is simply short — it is not made up on
+   * the other side, which would leave the hit sitting at a different spot in
+   * every row and read as less regular, not more. */
+  function ensureViewSpans() {
+    if (viewSpans) return viewSpans;
+    viewSpans = new Map();
+    for (const entry of idx.nodes) {
+      const p = entry.node.parentElement;
+      const host = p && p.closest('[data-view]');
+      if (!host) continue;
+      const id = host.dataset.view;
+      const from = rawToCollapsed(entry.start);
+      const to = rawToCollapsed(entry.start + entry.node.nodeValue.length);
+      const span = viewSpans.get(id);
+      if (!span) viewSpans.set(id, { from, to });
+      else {
+        if (from < span.from) span.from = from;
+        if (to > span.to) span.to = to;
+      }
+    }
+    return viewSpans;
+  }
+
+  // depth-first over the view graph: the order the document reads in, which is
+  // also the order of the nav tree, so a result list keeps its sense of place
+  function viewOrder() {
+    const kids = new Map();
+    for (const [id, v] of views) {
+      const p = v.parent || '';
+      if (!kids.has(p)) kids.set(p, []);
+      kids.get(p).push(id);
+    }
+    const out = [], seen = new Set();
+    const walk = (id) => {
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      out.push(id);
+      for (const c of kids.get(id) || []) walk(c);
+    };
+    walk(homeId());
+    for (const id of views.keys()) walk(id);  // views detached from the root
+    return out;
+  }
+
+  function hostViewOf(collapsedPos) {
+    const p = posToNode(searchIdx.map[collapsedPos]).node.parentElement;
+    const host = p && p.closest('[data-view]');
+    return host ? host.dataset.view : '';
+  }
+
+  // the label a result carries: the view path, plus the stepper tab or
+  // <details> the hit is folded inside, so "it is behind a tab" is visible
+  // before the click rather than after it
+  function trailOf(collapsedPos, viewId) {
+    const parts = [];
+    for (let cur = viewId; cur; cur = (views.get(cur) || {}).parent) {
+      const v = views.get(cur);
+      if (!v) break;
+      parts.unshift(v.title);
+    }
+    let el = posToNode(searchIdx.map[collapsedPos]).node.parentElement;
+    const inner = [];
+    while (el && el !== content) {
+      if (el.classList && el.classList.contains('ex-step') && el.dataset.label) {
+        inner.unshift(el.dataset.label);
+      } else if (el.tagName === 'DETAILS') {
+        const sum = el.querySelector(':scope > summary');
+        if (sum) inner.unshift(sum.textContent.trim().slice(0, 40));
+      }
+      el = el.parentElement;
+    }
+    return parts.concat(inner);
+  }
+
+  function runSearch(q) {
+    searchQuery = collapseQuery(q);
+    searchHits = [];
+    searchChunks = [];
+    searchCurrent = -1;
+    searchTruncated = 0;
+    searchStale = false;
+    searchEtag = lastEtag;
+    if (!searchQuery) { paintHighlights(); renderSearch(); return; }
+
+    buildSearchIndex();
+    const probe = lowerAligned(searchQuery);
+    const hay = searchIdx.lower;
+    const all = [];
+    let from = 0, pos;
+    while ((pos = hay.indexOf(probe, from)) !== -1) {
+      all.push({ from: pos, to: pos + probe.length });
+      from = pos + probe.length;  // matches don't overlap, the way find does it
+    }
+
+    const spans = ensureViewSpans();
+    const byView = new Map();
+    for (const h of all) {
+      const id = hostViewOf(h.from);
+      if (!byView.has(id)) byView.set(id, []);
+      byView.get(id).push(h);
+    }
+
+    // the view being read comes first — those hits cost no navigation at all
+    const ids = [];
+    if (byView.has(activeView)) ids.push(activeView);
+    for (const id of viewOrder()) if (id !== activeView && byView.has(id)) ids.push(id);
+    for (const id of byView.keys()) if (!ids.includes(id)) ids.push(id);
+
+    const whole = { from: 0, to: searchIdx.text.length };
+    outer:
+    for (const id of ids) {
+      const span = spans.get(id) || whole;
+      let chunk = null;
+      for (const h of byView.get(id)) {
+        if (searchHits.length >= SEARCH_MAX) { searchTruncated = all.length - searchHits.length; break outer; }
+        const at = searchHits.push(h) - 1;
+        // hits within a padding's reach share one preview, and the window
+        // grows to hold them so the outer padding stays the same width
+        if (chunk && h.from - chunk.to <= SEARCH_GAP) {
+          chunk.to = h.to;
+          chunk.hits.push(h);
+          chunk.last = at;
+          continue;
+        }
+        chunk = {
+          viewId: id, span, from: h.from, to: h.to, hits: [h],
+          first: at, last: at, trail: trailOf(h.from, id),
+        };
+        searchChunks.push(chunk);
+      }
+    }
+    paintHighlights();
+    renderSearch();
+  }
+
+  function rawRange(h) {
+    const m = searchIdx.map;
+    if (h.from >= m.length) return null;
+    const start = m[h.from];
+    const end = h.to - 1 < m.length ? m[h.to - 1] + 1 : idx.text.length;
+    try { return rangeFromOffsets(start, end); } catch { return null; }
+  }
+
+  /* Two highlights, not one: every hit stays faintly lit so the shape of the
+   * matches across the page is readable, while the one that was jumped to is
+   * lit hard. Both sit above the comment marks, which keep priority 0 — while
+   * you are searching, the hit has to win the pixel. */
+  function paintSearch() {
+    if (!('highlights' in CSS)) return;
+    const all = new Highlight();
+    const cur = new Highlight();
+    if (searchQuery && searchIdx) {
+      searchHits.forEach((h, i) => {
+        const r = rawRange(h);
+        if (!r) return;
+        (i === searchCurrent ? cur : all).add(r);
+      });
+    }
+    all.priority = 1;
+    cur.priority = 2;
+    CSS.highlights.set('ex-search', all);
+    CSS.highlights.set('ex-search-current', cur);
+  }
+
+  function gotoHit(i) {
+    if (i < 0 || i >= searchHits.length) return;
+    searchCurrent = i;
+    const r = rawRange(searchHits[i]);
+    if (!r) { renderSearch(); return; }
+    // switches view, opens ancestor <details>, activates the stepper tab —
+    // otherwise the jump lands on something display:none and shows nothing
+    revealForNode(r.startContainer);
+    paintHighlights();
+    renderSearch();
+    // the reveal above changed what is laid out, but getBoundingClientRect
+    // flushes layout itself, so this measures the new position without
+    // waiting a frame — rAF would never fire in a backgrounded tab
+    const live = rawRange(searchHits[i]);
+    if (!live) return;
+    const rect = live.getBoundingClientRect();
+    if (!rect.height && !rect.width) return;
+    const target = window.scrollY + rect.top - Math.min(220, window.innerHeight * 0.32);
+    const still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    window.scrollTo({ top: Math.max(0, target), behavior: still ? 'auto' : 'smooth' });
+  }
+
+  function stepHit(delta) {
+    if (!searchHits.length) return;
+    const next = searchCurrent < 0
+      ? (delta > 0 ? 0 : searchHits.length - 1)
+      : (searchCurrent + delta + searchHits.length) % searchHits.length;
+    gotoHit(next);
+    // keep the walked-to row in view inside the list — done by hand rather
+    // than scrollIntoView, which would also scroll the page and undo the jump.
+    // A row is labelled with its chunk's first hit, so walking into the second
+    // hit of a merged chunk has to look the chunk up rather than the hit.
+    const chunk = searchChunks.find((c) => next >= c.first && next <= c.last);
+    const row = chunk && searchPanel.querySelector(`[data-hit="${chunk.first}"]`);
+    if (!row) return;
+    const top = row.offsetTop - searchPanel.clientTop;
+    if (top < searchPanel.scrollTop) searchPanel.scrollTop = top;
+    else if (top + row.offsetHeight > searchPanel.scrollTop + searchPanel.clientHeight) {
+      searchPanel.scrollTop = top + row.offsetHeight - searchPanel.clientHeight;
+    }
+  }
+
+  function buildSearchControl() {
+    searchBox = document.createElement('div');
+    searchBox.className = 'ex-search';
+
+    searchBtn = document.createElement('button');
+    searchBtn.type = 'button';
+    searchBtn.className = 'ex-search-btn';
+    searchBtn.title = S.search;
+    searchBtn.setAttribute('aria-label', S.search);
+    searchBtn.innerHTML =
+      '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">' +
+      '<circle cx="7" cy="7" r="4.4" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
+      '<path d="M10.5 10.5 L14 14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>' +
+      '</svg><span class="ex-search-badge"></span>';
+    searchBtn.addEventListener('click', () => (searchOpen ? closeSearch() : openSearch()));
+
+    searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.className = 'ex-search-input';
+    searchInput.placeholder = S.searchPlaceholder;
+    searchInput.setAttribute('aria-label', S.search);
+    // Any browser-drawn popup over this field (autofill history, spelling)
+    // eats the first Escape in the browser UI and never delivers the keydown,
+    // so the reader has to press it twice to close the search.
+    searchInput.setAttribute('autocomplete', 'off');
+    searchInput.setAttribute('autocorrect', 'off');
+    searchInput.setAttribute('autocapitalize', 'off');
+    searchInput.spellcheck = false;
+    searchInput.addEventListener('keydown', onSearchKey);
+    searchInput.addEventListener('input', () => {
+      // Nothing runs until Enter, with one exception: emptying the box ends
+      // the search outright. Editing does NOT reopen a folded list — popping
+      // the previous query's results up beside different text reads as a bug.
+      if (!collapseQuery(searchInput.value)) runSearch('');
+    });
+
+    searchPanel = document.createElement('div');
+    searchPanel.className = 'ex-search-panel';
+    searchPanel.hidden = true;
+    searchPanel.addEventListener('click', (e) => {
+      const row = e.target.closest('[data-hit]');
+      if (row) gotoHit(Number(row.dataset.hit));  // the dropdown stays open
+    });
+
+    searchBox.appendChild(searchBtn);
+    searchBox.appendChild(searchInput);
+    searchBox.appendChild(searchPanel);
+    return searchBox;
+  }
+
+  function onSearchKey(e) {
+    /* A CJK IME delivers the keydown for keys it is consuming itself: Enter
+     * commits a composition, the arrows walk the candidate list. Acting on
+     * those runs the search a keystroke early and then hands the typist's own
+     * Enter to "next hit" — a jump a Latin typist never gets for the same
+     * keys. Let the IME have them. */
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === 'Escape') {
+      // the version overlay also listens for Escape on document; while the
+      // search box is open the search is what Escape means
+      e.stopPropagation();
+      e.preventDefault();
+      closeSearch();
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const q = collapseQuery(searchInput.value);
+      // first Enter lists every match and lights them all without moving the
+      // page; Enter again walks them one at a time
+      if (q && q === searchQuery && searchHits.length && !searchStale) stepHit(1);
+      else { searchListOpen = true; runSearch(q); }
+      return;
+    }
+    if (e.key === 'ArrowDown') { e.preventDefault(); stepHit(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); stepHit(-1); }
+  }
+
+  function openSearch() {
+    if (!searchBox) return;
+    searchOpen = true;
+    if (searchChunks.length) searchListOpen = true;
+    searchBox.classList.add('ex-search-open');
+    document.body.classList.add('ex-searching');
+    renderSearch();
+    searchInput.focus();
+    searchInput.select();
+  }
+
+  // the whole search ends here: box, list and both highlights
+  function closeSearch() {
+    searchOpen = false;
+    searchListOpen = false;
+    if (searchBox) searchBox.classList.remove('ex-search-open');
+    document.body.classList.remove('ex-searching');
+    runSearch('');
+    if (searchInput) {
+      searchInput.value = '';
+      // The closed input is 0px wide and transparent but would keep focus,
+      // and onSearchKey stops Escape propagating — so an invisible box would
+      // go on eating Escape, and the version overlay could not be left.
+      if (document.activeElement === searchInput) searchBtn.focus();
+    }
+  }
+
+  // clicking into the document only folds the list away; the highlights and
+  // the hit count survive, so reading on and reopening picks up where it was
+  function collapseSearchList() {
+    if (!searchListOpen && !searchOpen) return;
+    searchListOpen = false;
+    searchOpen = false;
+    if (searchBox) searchBox.classList.remove('ex-search-open');
+    document.body.classList.remove('ex-searching');
+    // same reason as closeSearch(): a folded box must not hold the keyboard
+    if (searchInput && document.activeElement === searchInput) searchInput.blur();
+    renderSearch();
+  }
+
+  function fmt(s, vals) {
+    return String(s).replace(/\{(\w+)\}/g, (_, k) => (k in vals ? vals[k] : `{${k}}`));
+  }
+
+  function previewHtml(chunk) {
+    const t = searchIdx.text;
+    const from = Math.max(chunk.span.from, chunk.from - SEARCH_PAD);
+    const to = Math.min(chunk.span.to, chunk.to + SEARCH_PAD);
+    let html = '';
+    let cur = from;
+    for (const h of chunk.hits) {
+      html += esc(t.slice(cur, h.from)) + `<mark>${esc(t.slice(h.from, h.to))}</mark>`;
+      cur = h.to;
+    }
+    html += esc(t.slice(cur, to));
+    return (from > chunk.span.from ? '…' : '') + html + (to < chunk.span.to ? '…' : '');
+  }
+
+  function renderSearch() {
+    if (!searchPanel) return;
+
+    const badge = searchBtn.querySelector('.ex-search-badge');
+    badge.textContent = searchQuery && searchHits.length ? String(searchHits.length) : '';
+    searchBtn.classList.toggle('ex-search-has', !!(searchQuery && searchHits.length));
+    // the panel below carries the "search again" line, but it is hidden while
+    // the list is folded — the badge has to say it too or the warning is lost
+    searchBtn.classList.toggle('ex-search-stale', !!(searchQuery && searchStale));
+
+    if (!searchListOpen || !searchQuery) {
+      searchPanel.hidden = true;
+      searchPanel.innerHTML = '';
+      return;
+    }
+    searchPanel.hidden = false;
+    searchPanel.classList.toggle('ex-search-dim', searchStale);
+
+    const head =
+      (searchStale ? `<div class="ex-search-warn">${esc(S.searchStale)}</div>` : '') +
+      `<div class="ex-search-count">` +
+      (searchHits.length === 1
+        ? esc(S.searchCountOne)
+        : searchChunks.length === 1
+          ? esc(fmt(S.searchCountOnePlace, { n: searchHits.length }))
+          : esc(fmt(S.searchCount, { n: searchHits.length, m: searchChunks.length }))) +
+      (searchTruncated ? ` · ${esc(fmt(S.searchMore, { n: searchTruncated }))}` : '') +
+      `</div>`;
+
+    if (!searchHits.length) {
+      searchPanel.innerHTML = `<div class="ex-search-empty">${esc(S.searchNoResults)}</div>`;
+      return;
+    }
+
+    let html = head;
+    let group = null;
+    for (const chunk of searchChunks) {
+      const label = chunk.trail.length
+        ? chunk.trail.join(' › ')
+        : (views.get(chunk.viewId) || {}).title || '';
+      // a document with no views has nothing to label the groups with
+      if (label !== group) {
+        group = label;
+        if (label) html += `<div class="ex-search-group">${esc(label)}</div>`;
+      }
+      const on = searchCurrent >= chunk.first && searchCurrent <= chunk.last;
+      html += `<button type="button" class="ex-search-hit${on ? ' ex-search-hit-current' : ''}"` +
+        ` data-hit="${chunk.first}"><span class="ex-search-preview">${previewHtml(chunk)}</span></button>`;
+    }
+    // clicking a result re-renders this list; without this the list would
+    // snap back to the top every time, losing the reader's place in it
+    const keep = searchPanel.scrollTop;
+    searchPanel.innerHTML = html;
+    searchPanel.scrollTop = keep;
   }
 
   // ---------- selection -> fab -> popover ----------
@@ -1114,6 +1623,14 @@
       if (disconnected) { disconnected = false; render(); }
       if (initialEtag === null) initialEtag = st.doc_etag;
       else if (st.doc_etag !== initialEtag && !docUpdated) { docUpdated = true; render(); }
+      // Kept out of the branch above, which latches docUpdated and so fires
+      // once per page load: a reader who searches again after one rewrite has
+      // to be told about the next one too.
+      lastEtag = st.doc_etag;
+      if (searchQuery && searchEtag !== null && st.doc_etag !== searchEtag && !searchStale) {
+        searchStale = true;
+        renderSearch();
+      }
       if (st.watched !== watched) { watched = st.watched; render(); }
       if (!!st.server_stale !== serverStale) { serverStale = !!st.server_stale; render(); }
       // the version this page's HTML IS, pinned on the first poll the way
@@ -1178,9 +1695,22 @@
       if (e.key === 'Escape') closeComposer();
     });
     document.addEventListener('keydown', (e) => {
+      if (e.key === '/' && !typingTarget(e.target) && !document.getElementById('ex-versions')) {
+        e.preventDefault();
+        openSearch();
+        return;
+      }
       if (e.key !== 'Escape') return;
+      // Escape reaching document with the box focused was stopped in
+      // onSearchKey; this is the case where focus moved on to a result
+      if (searchOpen || searchListOpen || searchQuery) { closeSearch(); return; }
       removeFloating();
       if (document.getElementById('ex-versions')) leaveVersions();
+    });
+    document.addEventListener('mousedown', (e) => {
+      if (!searchOpen && !searchListOpen) return;
+      if (e.target.closest && e.target.closest('.ex-search')) return;
+      collapseSearchList();
     });
 
     fetch(`/${encodeURIComponent(CFG.slug)}/doc.json`)
