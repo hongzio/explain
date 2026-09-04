@@ -1580,7 +1580,10 @@
         const body = ta && ta.value.trim();
         if (!body) return;
         await req('POST', `/threads/${tid}/messages`, { author: 'user', body });
-        await refresh();
+        // forced, like submitNewThread: on the Cmd+Enter path the reply box
+        // still holds focus, and Safari doesn't focus a button on click
+        // either, so an unforced render would sit deferred until a blur
+        await refresh(true);
       } else if (act === 'goto') {
         revealAnchor(tid);
         // on narrow screens the sidebar drawer covers the content — close it
@@ -1610,7 +1613,7 @@
         if (!body) return;
         await req('PATCH', `/threads/${tid}/messages/${actEl.dataset.mid}`, { body });
         editingId = null;
-        await refresh();
+        await refresh(true);
       }
     } catch { /* next poll reconciles */ }
   }
@@ -1689,10 +1692,24 @@
     sidebar.addEventListener('input', (e) => {
       if (e.target.matches('[data-new]')) composerDraft = e.target.value;
     });
+    // Cmd+Enter submits whichever box the caret is in — the panel has three,
+    // and gating on [data-new] alone left replies and edits mouse-only. Each
+    // one presses its own button rather than calling a second path, so the
+    // keyboard can't drift away from what the button does.
     sidebar.addEventListener('keydown', (e) => {
-      if (!e.target.matches || !e.target.matches('[data-new]')) return;
-      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitNewThread(); }
-      if (e.key === 'Escape') closeComposer();
+      if (!e.target.matches) return;
+      const act = e.target.matches('[data-new]') ? 'send-new'
+        : e.target.matches('[data-reply]') ? 'reply'
+        : e.target.matches('[data-edit]') ? 'save-edit'
+        : null;
+      if (!act) return;
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        // scoped to the card: every open thread carries its own reply button
+        const btn = (e.target.closest('.ex-thread') || sidebar).querySelector(`[data-act="${act}"]`);
+        if (btn) btn.click();
+      }
+      if (e.key === 'Escape' && act === 'send-new') closeComposer();
     });
     document.addEventListener('keydown', (e) => {
       if (e.key === '/' && !typingTarget(e.target) && !document.getElementById('ex-versions')) {
