@@ -383,6 +383,12 @@ agent-initiated notes is noise the reader has to clear.
   comments; the watcher heartbeats it. Starting a watcher for a doc TAKES
   OVER from any previous session — that's the intended way to resume in a new
   conversation (catch-up in §4 first, then watch).
+- A takeover is silent: it overwrites the file, it does not signal the old
+  watcher. That watcher re-reads the lease before every event it would fire,
+  so it stands down with `lease_lost` rather than answering a doc it no
+  longer owns — the old session's process may still be alive, and two agents
+  replying to one comment is the failure this prevents. Per-doc: a session
+  watching several docs keeps the ones it still holds.
 - “Stop watching”: `pkill -f "watch.py.*--session <id>"`, and optionally
   remove the `owner.json` files so the server can GC sooner. The server and
   page stay usable; nobody answers until some session resumes.

@@ -92,6 +92,9 @@ def main() -> int:
     def comments_path(slug: str) -> Path:
         return root / slug / "comments.json"
 
+    def owns(slug: str) -> bool:
+        return read_json(owner_path(slug), {}).get("session") == args.session
+
     # acquire (or take over) the lease for every doc
     for slug in docs:
         if not (root / slug).is_dir():
@@ -102,14 +105,23 @@ def main() -> int:
     # catch-up trigger: if anything is already unread, fire immediately
     baseline = {}
     fired = False
-    for slug in docs:
+    for slug in docs[:]:
         c = read_json(comments_path(slug), {})
         baseline[slug] = c.get("rev", 0)
-        if has_unread(c):
-            emit("unread", slug)
-            fired = True
+        if not has_unread(c):
+            continue
+        # two watchers can start close enough together that the second one's
+        # acquire lands between our write above and this read
+        if not owns(slug):
+            emit("lease_lost", slug)
+            docs.remove(slug)
+            continue
+        emit("unread", slug)
+        fired = True
     if fired:
         return 0
+    if not docs:
+        return 3
 
     start = time.time()
     last_beat = start
@@ -124,8 +136,7 @@ def main() -> int:
 
         if now - last_beat >= args.heartbeat_interval:
             for slug in docs[:]:
-                current = read_json(owner_path(slug), {})
-                if current.get("session") != args.session:
+                if not owns(slug):
                     emit("lease_lost", slug)
                     docs.remove(slug)
                     continue
@@ -150,17 +161,30 @@ def main() -> int:
             last_srv = now
 
         fired = False
-        for slug in docs:
+        for slug in docs[:]:
             c = read_json(comments_path(slug), {})
             rev = c.get("rev", 0)
-            if rev != baseline[slug]:
-                if has_unread(c):
-                    emit("unread", slug)
-                    fired = True
-                else:
-                    baseline[slug] = rev
+            if rev == baseline[slug]:
+                continue
+            if not has_unread(c):
+                baseline[slug] = rev
+                continue
+            # Re-check ownership at the moment of firing, not just on the 30s
+            # heartbeat. A takeover lands by overwriting owner.json and never
+            # signals the old watcher, so between two heartbeats it would still
+            # believe it owns the doc — and since this branch never consulted
+            # the lease, both watchers fired on the same comment and both went
+            # off to answer it. The window is now one poll, not one heartbeat.
+            if not owns(slug):
+                emit("lease_lost", slug)
+                docs.remove(slug)
+                continue
+            emit("unread", slug)
+            fired = True
         if fired:
             return 0
+        if not docs:
+            return 3
 
 
 if __name__ == "__main__":
