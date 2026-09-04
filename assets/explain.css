@@ -25,6 +25,10 @@
   --ex-accent: #4d56c9;
   --ex-accent-hover: #3d45b5;
   --ex-accent-soft: rgba(94, 106, 210, 0.11);
+  /* selection is its own token, not --ex-accent-soft: that one also tints nav
+     rows, step tabs and chips, so the wash behind a drag can be tuned for
+     legibility without dragging nine other surfaces along with it */
+  --ex-select: rgba(94, 106, 210, 0.11);
   --ex-mark: rgba(255, 193, 7, 0.28);
   --ex-mark-active: rgba(255, 193, 7, 0.55);
   /* search marks take the accent hue so they can never be misread as the
@@ -64,6 +68,10 @@
     --ex-accent: #828fff;
     --ex-accent-hover: #9aa4ff;
     --ex-accent-soft: rgba(94, 106, 210, 0.18);
+    /* carries more alpha than its light counterpart: at 0.18 the wash landed
+       on #171a2e, 1.17:1 against the near-black ground, so a drag left no
+       visible block at all */
+    --ex-select: rgba(94, 106, 210, 0.36);
     --ex-mark: rgba(255, 203, 92, 0.24);
     --ex-mark-active: rgba(255, 203, 92, 0.45);
     --ex-find: rgba(130, 143, 255, 0.22);
@@ -89,7 +97,7 @@ body {
   font-feature-settings: "cv01", "ss03";
   text-rendering: optimizeLegibility;
 }
-::selection { background: var(--ex-accent-soft); }
+::selection { background: var(--ex-select); }
 
 button, textarea, input { font-family: inherit; }
 :is(button, textarea):focus-visible {
