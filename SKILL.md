@@ -54,14 +54,12 @@ Comment replies instead follow the language of the comment they answer.
 
 ## 2. Generate the document
 
-1. If `PROJECT` is a git repo and `.gitignore` doesn't cover `.explain/`,
-   append a `.explain/` line to it.
-2. Investigate the target (read the code / diff as needed).
-3. Read `SKILL_DIR/assets/template.html`, replace `{{TITLE}}`, `{{LANG}}`
+1. Investigate the target (read the code / diff as needed).
+2. Read `SKILL_DIR/assets/template.html`, replace `{{TITLE}}`, `{{LANG}}`
    (BCP-47 code, e.g. `en`, `ko`), `{{SLUG}}`, and `{{CONTENT}}`, and write it
    to `ROOT/<slug>/index.html`. Everything you author goes inside
    `{{CONTENT}}`; do not alter the surrounding skeleton.
-4. Write `ROOT/<slug>/doc.json`:
+3. Write `ROOT/<slug>/doc.json`:
    `{"title", "kind", "target", "lang", "created_at", "updated_at",
    "commit", "sources"}` — ISO timestamps (keep `created_at` when updating);
    `commit` = `git rev-parse --short HEAD` of the project (null outside git);
@@ -71,21 +69,21 @@ Comment replies instead follow the language of the comment they answer.
    record `coverage`: `{"hunks_total": N, "hunks_covered": M, "uncovered":
    ["path", …]}` and state that coverage plainly in the home view — an
    uncovered hunk the reader doesn't know about is worse than one they do.
-5. Validate before serving:
+4. Validate before serving:
    `python3 "SKILL_DIR/scripts/validate_doc.py" "ROOT/<slug>"` — fix every
    ERROR. Beyond structure, this VERIFIES EVIDENCE against the project:
    `data-src` files must exist, code excerpts must appear verbatim in them,
    and `file:line` citations must point at real files and in-range lines —
    fabricated or drifted evidence fails the build. Read the WARNs and act
    on the reasonable ones.
-6. Adversarial pass: before announcing the doc, have it refuted. On Claude
+5. Adversarial pass: before announcing the doc, have it refuted. On Claude
    Code spawn a subagent (Explore) with the doc's HTML and the cited source
    files, instructed to find claims that misread the code, wrong values in
    data examples, and important behavior the doc omits; elsewhere, re-read
    the doc yourself against the sources with that same brief. Fix what
    survives scrutiny, re-validate, then serve. The validator proves the
    evidence is real; this pass is what checks the narrative around it.
-7. Record the version — after every write of `index.html`, including the
+6. Record the version — after every write of `index.html`, including the
    first. Needs the server, so on a new document this comes right after §3;
    on an update you are already serving, so do it as soon as the write lands:
    ```sh
@@ -101,9 +99,9 @@ Comment replies instead follow the language of the comment they answer.
    file move, labelled “auto-recorded”); these two fields are the entire
    reason the entry is worth reading. The reader gets the before/after
    comparison from the page — never diff anything yourself.
-8. Never write `comments.json` or `versions.json` yourself — the server owns
+7. Never write `comments.json` or `versions.json` yourself — the server owns
    both.
-9. **Updating an existing doc** (code changed / “update it”): hash the
+8. **Updating an existing doc** (code changed / “update it”): hash the
    current `sources` files and compare with `doc.json`. Rewrite only the
    sections whose evidence drifted; keep other sections verbatim (comment
    anchors survive on unchanged wording — unlocatable ones show as “lost
@@ -353,7 +351,7 @@ For each unread thread (`GET …/comments`, `threads[].status == "unread"`):
    (next step).
 5. If the comment points out an error or asks for a change in the document,
    you may edit the doc: rewrite `ROOT/<slug>/index.html` (and bump
-   `doc.json.updated_at`), then record the version (§2-7) with this thread's
+   `doc.json.updated_at`), then record the version (§2-6) with this thread's
    id in `threads`. Readers get a reload banner automatically, and it offers
    them the diff.
 
@@ -410,7 +408,7 @@ Base: `<url>/api/docs/<slug>`
 |---|---|---|
 | GET `/state` | — | `{rev, doc_etag, watched, unseen_for_user, server_stale, version}` |
 | GET `/versions` | — | `{versions:[{n, hash, created_at, summary, threads, source, commit}, …]}` |
-| POST `/versions` | `{summary?, threads?}` | record/annotate the current `index.html` (§2-7); 409 if the file is missing or half-written |
+| POST `/versions` | `{summary?, threads?}` | record/annotate the current `index.html` (§2-6); 409 if the file is missing or half-written |
 | GET `<url>/api/ping` | — | `{ok, root, pid, source, stale}` — not doc-scoped; `stale` means the daemon predates `server.py` on disk (§3) |
 | GET `/comments` | — | full comment data `{rev, threads:[…]}` |
 | POST `/threads` | `{body, anchor?:{exact,prefix,suffix}, context?:{view,title}, author?}` | new thread (user → `unread`); no `anchor` → document-level |
