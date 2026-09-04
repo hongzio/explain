@@ -8,9 +8,10 @@ agent session watching the document replies in near real time (and may fix the
 document itself).
 
 - Zero dependencies: Python ≥ 3.11 stdlib only.
-- Documents and comments live in the project's `.explain/` directory
-  (gitignored) and survive across sessions; a new session catches up on
-  unanswered comments and takes over watching.
+- Documents and comments live in the project's `.explain/` directory and
+  survive across sessions; a new session catches up on unanswered comments
+  and takes over watching. The skill never edits `.gitignore` — whether the
+  documents are committed is your call.
 - Every rewrite is kept as a version, so when the agent revises the document
   after your feedback you can see exactly which sections changed — and which
   comment prompted it — instead of rereading the whole page.
@@ -31,7 +32,9 @@ npx skills add hongzio/explain -g     # global
 - Claude Code: `/explain src/auth/` · `/explain main..feature` · `/explain how does caching work?`
 - Codex: `$explain …`
 
-The skill is explicit-invocation only on both agents.
+The skill is explicit-invocation only on both agents. On Codex the comment
+watch loop occupies the session — nothing there wakes an idle agent when a
+background process exits — so it waits instead of working on something else.
 
 ## License
 
