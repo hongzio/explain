@@ -608,12 +608,24 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "author must be 'user' or 'agent'")
         if not text:
             raise ApiError(400, "empty message body")
+        # The id of the last message the sender had seen. An agent takes real
+        # time to write a reply, and a comment landing in that gap used to be
+        # marked answered by the reply it predates — read by nobody, and past
+        # rescue, since the watcher only ever wakes on 'unread'. Comparing
+        # against the thread's tail under the lock is what closes that.
+        after = body.get("after")
         msg = make_message(author, text)
 
         def fn(data):
             t = find_thread(data, tid)
+            # unrecognised or missing ids count as stale on purpose: this
+            # decides between waking the agent again and dropping a question
+            # in silence, and only one of those is recoverable
+            stale = after is not None and (
+                not t["messages"] or t["messages"][-1]["id"] != after
+            )
             t["messages"].append(msg)
-            t["status"] = "unread" if author == "user" else "answered"
+            t["status"] = "unread" if author == "user" or stale else "answered"
             t["updated_at"] = now_iso()
 
         data = STORE.mutate(slug, fn)

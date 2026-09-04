@@ -332,7 +332,8 @@ Per-agent wake mechanics:
 For each unread thread (`GET …/comments`, `threads[].status == "unread"`):
 
 1. Read the whole thread: `anchor.exact` is the highlighted document text;
-   `messages` is the conversation so far. Note that the anchor is RENDERED
+   `messages` is the conversation so far. Keep the id of the last message you
+   read — step 6 needs it. Note that the anchor is RENDERED
    text (concatenated text nodes), so a selection spanning inline tags won't
    grep verbatim in the HTML source (`the <code>foo</code> function` anchors
    as `the foo function`) — locate it ignoring tags, narrowing with
@@ -361,15 +362,23 @@ For each unread thread (`GET …/comments`, `threads[].status == "unread"`):
    before — for the person following the conversation; the **version
    summary** says *what changed*, in one line, for whoever scans the history
    weeks later. Don't restate the whole edit in the reply; the diff shows it.
-6. Reply:
+6. Reply, passing `after` — the id of the last message you actually read in
+   that thread:
    ```sh
    curl -s -X POST <url>/api/docs/<slug>/threads/<tid>/messages \
      -H 'Content-Type: application/json' \
-     -d '{"author": "agent", "body": "…"}'
+     -d '{"author": "agent", "body": "…", "after": "m-…"}'
    ```
-   An agent reply marks the thread `answered` automatically. Never mark
-   threads resolved yourself — that's the reader's button — and don't touch
-   `resolved` threads unless the reader reopens them.
+   An agent reply marks the thread `answered` automatically — but only if
+   `after` still matches the thread's last message. Writing a reply takes
+   real time, and a reader who adds a second question while you write would
+   otherwise have it marked answered by a reply that predates it: read by
+   nobody, and unrecoverable, since the watcher only ever wakes on `unread`.
+   With `after`, that thread stays `unread` and wakes you again for the part
+   you have not seen. ALWAYS send it; omitting it restores the old
+   swallow-on-race behaviour. Never mark threads resolved yourself — that's
+   the reader's button — and don't touch `resolved` threads unless the reader
+   reopens them.
 7. Escape/quote carefully; body is plain text (no markdown rendering).
 
 You may also OPEN a document-level thread yourself — `POST /threads` with
@@ -405,7 +414,7 @@ Base: `<url>/api/docs/<slug>`
 | GET `<url>/api/ping` | — | `{ok, root, pid, source, stale}` — not doc-scoped; `stale` means the daemon predates `server.py` on disk (§3) |
 | GET `/comments` | — | full comment data `{rev, threads:[…]}` |
 | POST `/threads` | `{body, anchor?:{exact,prefix,suffix}, context?:{view,title}, author?}` | new thread (user → `unread`); no `anchor` → document-level |
-| POST `/threads/<tid>/messages` | `{author, body}` | reply; user → `unread`, agent → `answered` |
+| POST `/threads/<tid>/messages` | `{author, body, after?}` | reply; user → `unread`, agent → `answered` — unless `after` (the last message id the sender read) no longer matches the thread's tail, which keeps it `unread` so the unseen part still wakes someone |
 | PATCH `/threads/<tid>` | `{action: resolve\|reopen\|seen}` | status / mark agent msgs seen |
 | PATCH `/threads/<tid>/messages/<mid>` | `{body}` | edit; user edit → thread `unread` |
 | DELETE `/threads/<tid>`, `/threads/<tid>/messages/<mid>` | — | delete (root message deletes thread) |
