@@ -433,12 +433,17 @@ html[lang="ko"] pre.ex-data[data-verified="executed"]::after { content: "✓ 실
 }
 
 /* ---- comment highlights (CSS Custom Highlight API) ---- */
-::highlight(ex-hl) { background-color: var(--ex-mark); }
-::highlight(ex-hl-active) { background-color: var(--ex-mark-active); }
+/* the marks also force --ex-fg: an anchor can land on faint text (a
+   figcaption, say), and #62666d under the amber blend reads 1.04:1 — the
+   sentence you are pointing at would vanish exactly when you point at it.
+   No alpha fixes that; the amber is mid-luminance by design, so the text
+   has to move instead. */
+::highlight(ex-hl) { background-color: var(--ex-mark); color: var(--ex-fg); }
+::highlight(ex-hl-active) { background-color: var(--ex-mark-active); color: var(--ex-fg); }
 /* search rides above those (priority set in JS): every hit faintly, the one
    jumped to hard, so the page shows both where the matches are and which
    one you are standing on */
-::highlight(ex-search) { background-color: var(--ex-find); }
+::highlight(ex-search) { background-color: var(--ex-find); color: var(--ex-fg); }
 ::highlight(ex-search-current) { background-color: var(--ex-find-active); color: var(--ex-fg); }
 
 /* ---- search ---- */
