@@ -183,14 +183,53 @@ body.ex-has-nav #ex-nav {
     transform: translateX(0); visibility: visible;
     transition: transform 0.22s cubic-bezier(0.175, 0.885, 0.32, 1.1);
   }
+  body.ex-has-nav .ex-nav-close { display: block; }
+  /* the head stays put while the tree scrolls, so close is always in reach.
+     A scroll container's top padding scrolls with its content, so the drawer
+     drops its own and the first child supplies that spacing instead —
+     otherwise the tree would slide through the gap above the pinned head. */
+  body.ex-has-nav #ex-nav { padding-top: 0; }
+  body.ex-has-nav #ex-nav > .ex-ver-btn:first-child { margin-top: 1rem; }
+  body.ex-has-nav #ex-nav .ex-nav-head {
+    position: sticky; top: 0; z-index: 1;
+    background: var(--ex-panel);
+    margin: 0 -0.75rem 0.7rem;
+    padding: 0.6rem 1.25rem;
+  }
+  body.ex-has-nav #ex-nav .ex-nav-head:first-child { padding-top: 1.3rem; }
+  body.ex-has-nav.ex-nav-open .ex-nav-backdrop {
+    opacity: 1; visibility: visible;
+    transition: opacity 0.22s ease-out;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
-  body.ex-has-nav .ex-layout, body.ex-has-nav #ex-nav { transition: none; }
+  body.ex-has-nav .ex-layout, body.ex-has-nav #ex-nav,
+  .ex-nav-backdrop { transition: none; }
 }
 .ex-nav-head {
+  display: flex; align-items: center; gap: 0.4rem;
   font-size: 0.68rem; font-weight: 600; letter-spacing: 0.05em;
   text-transform: uppercase; color: var(--ex-faint);
   padding: 0 0.5rem; margin-bottom: 0.7rem;
+}
+.ex-nav-head-label { flex: 1; min-width: 0; }
+/* On narrow screens the open drawer covers the breadcrumb bar's toggle, so the
+   drawer carries its own close control; desktop keeps using the breadcrumb one. */
+.ex-nav-close {
+  display: none; flex: none;
+  border: none; background: none; color: var(--ex-faint);
+  font-size: 1.1rem; line-height: 1; padding: 0.1rem 0.35rem;
+  margin-right: -0.25rem;
+  border-radius: 6px; cursor: pointer;
+  transition: color 0.12s ease-out, background 0.12s ease-out;
+}
+.ex-nav-close:hover { color: var(--ex-fg); background: var(--ex-line); }
+/* sits under the drawer, over everything else, so a tap outside closes it */
+.ex-nav-backdrop {
+  position: fixed; inset: 0; z-index: 39;
+  background: rgba(0, 0, 0, 0.42);
+  opacity: 0; visibility: hidden;
+  transition: opacity 0.22s ease-out, visibility 0s linear 0.22s;
 }
 .ex-nav-tree ul { list-style: none; margin: 0; padding: 0; }
 .ex-nav-item {

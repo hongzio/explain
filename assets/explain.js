@@ -333,9 +333,22 @@
       (content.closest('.ex-layout') || content.parentElement).prepend(nav);
     }
     nav.innerHTML =
-      `<div class="ex-nav-head">${esc(S.contents)}</div><nav class="ex-nav-tree"></nav>`;
+      `<div class="ex-nav-head"><span class="ex-nav-head-label">${esc(S.contents)}</span>` +
+      `<button class="ex-nav-close" data-act="close-nav" title="${esc(S.close)}"` +
+      ` aria-label="${esc(S.close)}">\u00d7</button></div>` +
+      '<nav class="ex-nav-tree"></nav>';
     navTree = nav.querySelector('.ex-nav-tree');
     navTree.addEventListener('click', onNavClick);
+    // the drawer hides the breadcrumb bar's toggle while it is open, so these
+    // two are the only way back out on a narrow screen
+    nav.querySelector('.ex-nav-close').addEventListener('click', closeNav);
+    if (!document.querySelector('.ex-nav-backdrop')) {
+      const backdrop = document.createElement('div');
+      backdrop.className = 'ex-nav-backdrop ex-ui';
+      backdrop.setAttribute('aria-hidden', 'true');
+      backdrop.addEventListener('click', closeNav);
+      document.body.appendChild(backdrop);
+    }
     document.body.classList.add('ex-has-nav');
     try {
       if (localStorage.getItem('explain:nav-collapsed') === '1') {
@@ -343,6 +356,10 @@
       }
     } catch { /* storage unavailable */ }
     renderNav();
+  }
+
+  function closeNav() {
+    document.body.classList.remove('ex-nav-open');
   }
 
   function toggleNav() {
@@ -420,9 +437,7 @@
       return;
     }
     // links navigate via the hash; on narrow screens close the drawer after
-    if (e.target.closest('.ex-nav-link') && window.innerWidth <= 960) {
-      document.body.classList.remove('ex-nav-open');
-    }
+    if (e.target.closest('.ex-nav-link') && window.innerWidth <= 960) closeNav();
   }
 
   // ---------- version history ----------
