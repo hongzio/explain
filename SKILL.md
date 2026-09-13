@@ -243,10 +243,19 @@ python3 "SKILL_DIR/scripts/server.py" start --root "PROJECT/.explain" --open --d
 ```
 
 Prints JSON: `{"url", "port", "pid", "already_running", "restarted_stale",
-"opened"}`. The server is one-per-project, binds 127.0.0.1 only (port derived
-from the project path, so it's stable), is idempotent to start, and shuts
-itself down when no session lease is fresh and no HTTP request has arrived
-for a few minutes.
+"restarted_for_port", "opened"}`. The server is one-per-project, binds
+127.0.0.1 only (port derived from the project path, so it's stable), is
+idempotent to start, and shuts itself down when no session lease is fresh and
+no HTTP request has arrived for a few minutes.
+
+Add `--port <n>` to pin the port instead — for a port the user has already
+forwarded or bookmarked. An explicit port is a requirement, not a hint: if it
+is taken, `start` prints `{"error": "port <n> is unavailable"}` and exits 1
+rather than quietly landing somewhere else, and a daemon already serving this
+root from another port is retired and relaunched there
+(`restarted_for_port: true`), which drops any open page onto a dead URL until
+it reloads. Without `--port`, an occupied derived port still falls back to a
+free one.
 
 **Always show the URL to the user in chat.** Browser opening is best-effort —
 in sandboxed environments (e.g. Codex) it may fail or need approval; the URL

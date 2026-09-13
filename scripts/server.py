@@ -9,8 +9,8 @@ in one process).
 stdlib only. Python 3.11+.
 
 Commands:
-  server.py start  --root <project>/.explain [--open] [--doc <slug>]
-  server.py serve  --root <root> --port <n>       (internal: the daemon)
+  server.py start  --root <project>/.explain [--open] [--doc <slug>] [--port <n>]
+  server.py serve  --root <root> --port <n> [--strict-port]  (internal: the daemon)
   server.py status --root <root>
   server.py stop   --root <root>
 """
@@ -803,6 +803,11 @@ def cmd_serve(args) -> int:
         info = ping(args.port)
         if info and info.get("root") == str(root):
             return 0  # lost the startup race to an identical server
+        # a port the caller asked for by name is a requirement, not a hint:
+        # silently landing elsewhere would strand whoever hardcoded the URL
+        if args.strict_port:
+            sys.stderr.write(f"port {args.port} is unavailable\n")
+            return 1
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     httpd.daemon_threads = True
     port = httpd.server_address[1]
@@ -878,7 +883,14 @@ def cmd_start(args) -> int:
     # under a page that reloaded from disk; starting is the natural moment to
     # retire it, which also makes `start` the single fix for both stale and dead
     restarted = False
-    if info is not None and info.get("source") != RUNNING_DIGEST:
+    moved = False
+    if info is not None and (
+        info.get("source") != RUNNING_DIGEST or (args.port and info["port"] != args.port)
+    ):
+        restarted = info.get("source") != RUNNING_DIGEST
+        # an explicit --port is a request to serve *there*, so a daemon sitting
+        # on another port has to give the root up
+        moved = bool(args.port) and info["port"] != args.port
         try:
             os.kill(info["pid"], signal.SIGTERM)
             for _ in range(20):
@@ -888,14 +900,16 @@ def cmd_start(args) -> int:
         except OSError:
             pass
         info = None
-        restarted = True
 
     already = info is not None
     if info is None:
-        port = preferred_port(root)
+        port = args.port or preferred_port(root)
+        cmd = [sys.executable, str(Path(__file__).resolve()), "serve", "--root", str(root), "--port", str(port)]
+        if args.port:
+            cmd.append("--strict-port")
         log = open(root / "server.log", "ab")
-        subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), "serve", "--root", str(root), "--port", str(port)],
+        proc = subprocess.Popen(
+            cmd,
             stdout=log,
             stderr=log,
             stdin=subprocess.DEVNULL,
@@ -906,9 +920,17 @@ def cmd_start(args) -> int:
             info = running_server(root)
             if info:
                 break
+            if proc.poll() is not None:
+                # the daemon gave up; one last look, in case it merely lost a
+                # startup race to a twin that is now serving this root
+                info = running_server(root)
+                break
             time.sleep(0.2)
         if info is None:
-            print(json.dumps({"error": "server did not start; see .explain/server.log"}))
+            if args.port and proc.returncode:
+                print(json.dumps({"error": f"port {args.port} is unavailable"}))
+            else:
+                print(json.dumps({"error": "server did not start; see .explain/server.log"}))
             return 1
 
     url = info["url"] + (f"/{args.doc}/" if args.doc else "/")
@@ -918,6 +940,7 @@ def cmd_start(args) -> int:
         "pid": info["pid"],
         "already_running": already,
         "restarted_stale": restarted,
+        "restarted_for_port": moved,
     }
     if args.open:
         try:
@@ -964,9 +987,20 @@ def main() -> int:
         p.add_argument("--root", required=True, help="the project's .explain directory")
         if name == "serve":
             p.add_argument("--port", type=int, required=True)
+            p.add_argument(
+                "--strict-port",
+                action="store_true",
+                help="fail if --port is taken instead of falling back to a free one",
+            )
         if name == "start":
             p.add_argument("--open", action="store_true", help="open the browser (best effort)")
             p.add_argument("--doc", help="doc slug to open")
+            p.add_argument(
+                "--port",
+                type=int,
+                help="bind this port instead of the one derived from --root; "
+                "fails if it is taken, and moves a daemon already serving this root",
+            )
     args = parser.parse_args()
     return {"start": cmd_start, "serve": cmd_serve, "status": cmd_status, "stop": cmd_stop}[args.cmd](args)
 
