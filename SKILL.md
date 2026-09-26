@@ -242,11 +242,12 @@ only eyes catch layout.
 python3 "SKILL_DIR/scripts/server.py" start --root "PROJECT/.explain" --open --doc <slug>
 ```
 
-Prints JSON: `{"url", "port", "pid", "already_running", "restarted_stale",
-"restarted_for_port", "opened"}`. The server is one-per-project, binds
-127.0.0.1 only (port derived from the project path, so it's stable), is
-idempotent to start, and shuts itself down when no session lease is fresh and
-no HTTP request has arrived for a few minutes.
+Prints JSON: `{"url", "host", "port", "pid", "already_running",
+"restarted_stale", "restarted_for_port", "restarted_for_host", "exposed",
+"opened"}`. The server is one-per-project, binds 127.0.0.1 by default (port
+derived from the project path, so it's stable), is idempotent to start, and
+shuts itself down when no session lease is fresh and no HTTP request has
+arrived for a few minutes.
 
 Add `--port <n>` to pin the port instead — for a port the user has already
 forwarded or bookmarked. An explicit port is a requirement, not a hint: if it
@@ -256,6 +257,19 @@ root from another port is retired and relaunched there
 (`restarted_for_port: true`), which drops any open page onto a dead URL until
 it reloads. Without `--port`, an occupied derived port still falls back to a
 free one.
+
+Add `--host <addr>` to bind somewhere other than 127.0.0.1 — `0.0.0.0` to
+reach the page from a phone or another machine, a specific interface address
+to limit it to that one. It behaves like `--port`: an address that cannot be
+bound fails with `{"error": "cannot bind <addr>; see .explain/server.log"}`
+and exit 1, and a daemon serving this root on another address is retired and
+relaunched (`restarted_for_host: true`). `url` stays a loopback URL for a
+wildcard bind, since `0.0.0.0` is a bind instruction, not a destination.
+
+**A non-loopback bind exposes writes.** The HTTP API has no authentication, so
+anyone who can reach the port can post comments and replies as the user.
+`start` reports `exposed: true` and the daemon logs a warning; say so in chat
+when the user asks for one. Only pass `--host` when the user asked for it.
 
 **Always show the URL to the user in chat.** Browser opening is best-effort —
 in sandboxed environments (e.g. Codex) it may fail or need approval; the URL

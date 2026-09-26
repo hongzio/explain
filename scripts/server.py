@@ -9,14 +9,17 @@ in one process).
 stdlib only. Python 3.11+.
 
 Commands:
-  server.py start  --root <project>/.explain [--open] [--doc <slug>] [--port <n>]
-  server.py serve  --root <root> --port <n> [--strict-port]  (internal: the daemon)
+  server.py start  --root <project>/.explain [--open] [--doc <slug>]
+                   [--host <addr>] [--port <n>]
+  server.py serve  --root <root> --port <n> [--host <addr>] [--strict-port]
+                   (internal: the daemon)
   server.py status --root <root>
   server.py stop   --root <root>
 """
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import mimetypes
 import os
@@ -40,6 +43,7 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).resolve().parent.parent
 ASSETS_DIR = SKILL_DIR / "assets"
 
+DEFAULT_HOST = "127.0.0.1"
 PORT_BASE = 49152
 PORT_SPAN = 16000
 LEASE_TTL = 180        # an owner.json younger than this marks a live watching session
@@ -779,9 +783,48 @@ def server_json_path(root: Path) -> Path:
     return root / "server.json"
 
 
-def ping(port: int, timeout: float = 1.0):
+class ThreadingHTTPServerV6(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+def bind(host: str, port: int) -> ThreadingHTTPServer:
+    cls = ThreadingHTTPServer
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/ping", timeout=timeout) as r:
+        if ipaddress.ip_address(host).version == 6:
+            cls = ThreadingHTTPServerV6
+    except ValueError:
+        pass  # a name, not a literal: resolution picks the family
+    return cls((host, port), Handler)
+
+
+def reach_host(host: str) -> str:
+    """The address that *reaches* a daemon bound to `host`. A wildcard bind is
+    an instruction, not a destination, so it answers on loopback instead."""
+    if host in ("0.0.0.0", ""):
+        return "127.0.0.1"
+    if host in ("::", "::0"):
+        return "::1"
+    return host
+
+
+def url_for(host: str, port: int) -> str:
+    h = reach_host(host)
+    return f"http://[{h}]:{port}" if ":" in h else f"http://{h}:{port}"
+
+
+def exposed(host: str) -> bool:
+    """Whether this bind can be reached from off the machine."""
+    if host == "localhost":
+        return False
+    try:
+        return not ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return True  # an unclassifiable name: assume it points off-box
+
+
+def ping(host: str, port: int, timeout: float = 1.0):
+    try:
+        with urllib.request.urlopen(f"{url_for(host, port)}/api/ping", timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
     except Exception:
         return None
@@ -797,27 +840,38 @@ def cmd_serve(args) -> int:
     root.mkdir(parents=True, exist_ok=True)
     STORE = Store(root)
 
+    host = args.host
     try:
-        httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+        httpd = bind(host, args.port)
     except OSError:
-        info = ping(args.port)
+        info = ping(host, args.port)
         if info and info.get("root") == str(root):
             return 0  # lost the startup race to an identical server
+        # binding port 0 tells the two failures apart: it succeeds when only the
+        # port was taken, and that same socket then serves when the port was a
+        # hint. An unbindable host is never a hint, so it always ends here.
+        try:
+            spare = bind(host, 0)
+        except OSError as err:
+            sys.stderr.write(f"cannot bind {host}: {err}\n")
+            return 2
         # a port the caller asked for by name is a requirement, not a hint:
         # silently landing elsewhere would strand whoever hardcoded the URL
         if args.strict_port:
+            spare.server_close()
             sys.stderr.write(f"port {args.port} is unavailable\n")
             return 1
-        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        httpd = spare
     httpd.daemon_threads = True
     port = httpd.server_address[1]
     write_json_atomic(
         server_json_path(root),
         {
+            "host": host,
             "port": port,
             "pid": os.getpid(),
             "root": str(root),
-            "url": f"http://127.0.0.1:{port}",
+            "url": url_for(host, port),
             "source": RUNNING_DIGEST,
         },
     )
@@ -845,7 +899,12 @@ def cmd_serve(args) -> int:
             cleanup()
 
     threading.Thread(target=gc_loop, daemon=True).start()
-    sys.stderr.write(f"explain server on http://127.0.0.1:{port} root={root}\n")
+    if exposed(host):
+        sys.stderr.write(
+            f"WARNING: bound {host}, which is not loopback. The write API has no "
+            "authentication, so anyone who can reach this port can post comments.\n"
+        )
+    sys.stderr.write(f"explain server on {url_for(host, port)} (bound {host}) root={root}\n")
     httpd.serve_forever()
     return 0
 
@@ -868,7 +927,7 @@ def running_server(root: Path):
         return None
     if not alive(info["pid"]):
         return None
-    live = ping(info["port"])
+    live = ping(info.get("host", DEFAULT_HOST), info["port"])
     if live and live.get("root") == str(root):
         return info
     return None
@@ -882,15 +941,21 @@ def cmd_start(args) -> int:
     # a daemon that predates a change to this file keeps serving the old API
     # under a page that reloaded from disk; starting is the natural moment to
     # retire it, which also makes `start` the single fix for both stale and dead
+    want_host = args.host or DEFAULT_HOST
+    running_host = info.get("host", DEFAULT_HOST) if info else DEFAULT_HOST
     restarted = False
     moved = False
+    rehosted = False
     if info is not None and (
-        info.get("source") != RUNNING_DIGEST or (args.port and info["port"] != args.port)
+        info.get("source") != RUNNING_DIGEST
+        or (args.port and info["port"] != args.port)
+        or (args.host and running_host != args.host)
     ):
         restarted = info.get("source") != RUNNING_DIGEST
-        # an explicit --port is a request to serve *there*, so a daemon sitting
-        # on another port has to give the root up
+        # an explicit --port or --host is a request to serve *there*, so a daemon
+        # sitting on another address has to give the root up
         moved = bool(args.port) and info["port"] != args.port
+        rehosted = bool(args.host) and running_host != args.host
         try:
             os.kill(info["pid"], signal.SIGTERM)
             for _ in range(20):
@@ -904,7 +969,17 @@ def cmd_start(args) -> int:
     already = info is not None
     if info is None:
         port = args.port or preferred_port(root)
-        cmd = [sys.executable, str(Path(__file__).resolve()), "serve", "--root", str(root), "--port", str(port)]
+        cmd = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "serve",
+            "--root",
+            str(root),
+            "--host",
+            want_host,
+            "--port",
+            str(port),
+        ]
         if args.port:
             cmd.append("--strict-port")
         log = open(root / "server.log", "ab")
@@ -927,20 +1002,26 @@ def cmd_start(args) -> int:
                 break
             time.sleep(0.2)
         if info is None:
-            if args.port and proc.returncode:
+            if proc.returncode == 2:
+                print(json.dumps({"error": f"cannot bind {want_host}; see .explain/server.log"}))
+            elif args.port and proc.returncode:
                 print(json.dumps({"error": f"port {args.port} is unavailable"}))
             else:
                 print(json.dumps({"error": "server did not start; see .explain/server.log"}))
             return 1
 
     url = info["url"] + (f"/{args.doc}/" if args.doc else "/")
+    host = info.get("host", DEFAULT_HOST)
     result = {
         "url": url,
+        "host": host,
         "port": info["port"],
         "pid": info["pid"],
         "already_running": already,
         "restarted_stale": restarted,
         "restarted_for_port": moved,
+        "restarted_for_host": rehosted,
+        "exposed": exposed(host),
     }
     if args.open:
         try:
@@ -956,7 +1037,7 @@ def cmd_status(args) -> int:
     info = running_server(root)
     out = {"running": info is not None, "server": info, "expected_source": RUNNING_DIGEST}
     if info is not None:
-        live = ping(info["port"]) or {}
+        live = ping(info.get("host", DEFAULT_HOST), info["port"]) or {}
         # a daemon old enough not to report `stale` never stamped a source
         # either, so its absence is itself the answer
         out["stale"] = bool(live["stale"]) if "stale" in live else info.get("source") != RUNNING_DIGEST
@@ -986,6 +1067,7 @@ def main() -> int:
         p = sub.add_parser(name)
         p.add_argument("--root", required=True, help="the project's .explain directory")
         if name == "serve":
+            p.add_argument("--host", default=DEFAULT_HOST)
             p.add_argument("--port", type=int, required=True)
             p.add_argument(
                 "--strict-port",
@@ -1000,6 +1082,12 @@ def main() -> int:
                 type=int,
                 help="bind this port instead of the one derived from --root; "
                 "fails if it is taken, and moves a daemon already serving this root",
+            )
+            p.add_argument(
+                "--host",
+                help=f"bind this address instead of {DEFAULT_HOST}; anything but "
+                "loopback exposes the unauthenticated write API to the network, "
+                "and moves a daemon already serving this root",
             )
     args = parser.parse_args()
     return {"start": cmd_start, "serve": cmd_serve, "status": cmd_status, "stop": cmd_stop}[args.cmd](args)
