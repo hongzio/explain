@@ -57,7 +57,8 @@
       generatedFrom: 'Generated from',
       goToAnchor: 'Go to text',
       contents: 'Contents',
-      toggleNav: 'Toggle sidebar',
+      toggleNav: 'Toggle contents',
+      toggleSidebar: 'Toggle conversations',
       toggleBranch: 'Expand or collapse',
       versions: 'Versions',
       versionsTitle: 'Version history',
@@ -129,7 +130,8 @@
       generatedFrom: '생성 기준',
       goToAnchor: '위치로 이동',
       contents: '목차',
-      toggleNav: '사이드바 접기/펼치기',
+      toggleNav: '목차 접기/펼치기',
+      toggleSidebar: '대화 패널 접기/펼치기',
       toggleBranch: '펼치기/접기',
       versions: '버전 기록',
       versionsTitle: '버전 기록',
@@ -169,6 +171,7 @@
   const API = `/api/docs/${encodeURIComponent(CFG.slug)}`;
 
   let content, sidebar, toggleBtn;
+  let sideToggleBtn = null;       // the panel's collapse control, in the crumb bar
   let data = { rev: -1, threads: [] };
   let idx = null;                 // {text, nodes:[{node,start}], nodeMap}
   let views = new Map();          // viewId -> {el, title, parent}
@@ -264,6 +267,7 @@
     });
     crumbs.appendChild(crumbTrail);
     crumbs.appendChild(buildSearchControl());
+    crumbs.appendChild(buildSidebarToggle());
     content.prepend(crumbs);
     if (els.length) setupNav();
   }
@@ -547,12 +551,12 @@
     openThread: (id) => {
       leaveVersions();
       openThread(id);
-      document.body.classList.add('ex-sidebar-open');
+      openSidebar();
     },
     discuss: (view, title) => {
       leaveVersions();
       openComposer({ view, title });
-      document.body.classList.add('ex-sidebar-open');
+      openSidebar();
     },
   };
 
@@ -1287,6 +1291,7 @@
         try {
           const res = await req('POST', '/threads', { anchor: pendingAnchor, body });
           openId = res.thread.id;
+          openSidebar();
           removeFloating();
           window.getSelection().removeAllRanges();
           await refresh();
@@ -1310,7 +1315,7 @@
       try {
         if (r && r.isPointInRange(pos.node, pos.offset)) {
           openThread(t.id);
-          document.body.classList.add('ex-sidebar-open');
+          openSidebar();
           return;
         }
       } catch { /* node not comparable */ }
@@ -1318,6 +1323,54 @@
   }
 
   // ---------- sidebar ----------
+
+  /* Twin of the nav's toggle at the other end of the breadcrumb bar. Desktop
+   * only (see .ex-side-toggle), so unlike toggleNav there is no drawer branch:
+   * on a narrow screen the floating button owns the drawer. */
+  function buildSidebarToggle() {
+    sideToggleBtn = document.createElement('button');
+    sideToggleBtn.className = 'ex-side-toggle';
+    sideToggleBtn.title = S.toggleSidebar;
+    sideToggleBtn.setAttribute('aria-label', S.toggleSidebar);
+    sideToggleBtn.addEventListener('click', toggleSidebar);
+    try {
+      if (localStorage.getItem('explain:sidebar-collapsed') === '1') {
+        document.body.classList.add('ex-sidebar-collapsed');
+      }
+    } catch { /* storage unavailable */ }
+    renderSideToggle();
+    return sideToggleBtn;
+  }
+
+  /* An open panel marks its own unread threads, so the count only rides the
+   * toggle while the panel is collapsed and those marks are out of sight. A
+   * reply arriving does not unfold the panel — the reader folded it. */
+  function renderSideToggle() {
+    if (!sideToggleBtn) return;
+    const n = document.body.classList.contains('ex-sidebar-collapsed')
+      ? data.threads.reduce((t, th) => t + unseenCount(th), 0)
+      : 0;
+    sideToggleBtn.innerHTML = '💬' + (n ? `<span class="ex-side-count">${n}</span>` : '');
+  }
+
+  function setSidebarCollapsed(collapsed) {
+    document.body.classList.toggle('ex-sidebar-collapsed', collapsed);
+    try {
+      localStorage.setItem('explain:sidebar-collapsed', collapsed ? '1' : '0');
+    } catch { /* storage unavailable */ }
+    renderSideToggle();
+  }
+
+  function toggleSidebar() {
+    setSidebarCollapsed(!document.body.classList.contains('ex-sidebar-collapsed'));
+  }
+
+  /* Reaching a thread from the document has to bring the panel back whichever
+   * way it is hidden: drawer on a narrow screen, folded column on a wide one. */
+  function openSidebar() {
+    document.body.classList.add('ex-sidebar-open');
+    setSidebarCollapsed(false);
+  }
 
   function esc(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1492,6 +1545,7 @@
     }
     sidebar.innerHTML = html;
     toggleBtn.textContent = '💬' + (totalUnseen ? ` ${totalUnseen}` : '');
+    renderSideToggle();
     paintHighlights();
   }
 

@@ -106,7 +106,14 @@ button, textarea, input { font-family: inherit; }
 }
 
 /* ---- layout ---- */
-.ex-layout { display: grid; grid-template-columns: minmax(0, 1fr) 360px; }
+/* Column widths are tokens so the nav x conversation-panel collapse states
+   don't have to be enumerated as grid-template-columns literals. Both
+   collapses are desktop-only: below 961px each panel is a fixed drawer and
+   these go unread. */
+body { --ex-nav-w: 260px; --ex-side-w: 360px; }
+body.ex-nav-collapsed { --ex-nav-w: 0px; }
+body.ex-sidebar-collapsed { --ex-side-w: 0px; }
+.ex-layout { display: grid; grid-template-columns: minmax(0, 1fr) var(--ex-side-w); }
 #explain-content { max-width: 52rem; margin: 0 auto; padding: 2rem 2.25rem 6rem; min-width: 0; width: 100%; }
 #ex-sidebar {
   border-left: 1px solid var(--ex-line);
@@ -157,14 +164,20 @@ body.ex-has-nav #ex-nav {
   min-width: 0;
 }
 @media (min-width: 961px) {
+  .ex-layout { transition: grid-template-columns 0.2s ease-out; }
   body.ex-has-nav .ex-layout {
-    grid-template-columns: 260px minmax(0, 1fr) 360px;
-    transition: grid-template-columns 0.2s ease-out;
+    grid-template-columns: var(--ex-nav-w) minmax(0, 1fr) var(--ex-side-w);
   }
-  body.ex-has-nav.ex-nav-collapsed .ex-layout { grid-template-columns: 0 minmax(0, 1fr) 360px; }
   /* visibility (not just opacity) so collapsed links leave the tab order */
   body.ex-has-nav.ex-nav-collapsed #ex-nav {
     padding-inline: 0; border-right-width: 0;
+    opacity: 0; visibility: hidden; overflow: hidden;
+    transition: opacity 0.12s ease-out, visibility 0s linear 0.12s;
+  }
+  /* the conversation panel folds the same way, for the same reason: its
+     composer and thread buttons must leave the tab order with it */
+  body.ex-sidebar-collapsed #ex-sidebar {
+    padding-inline: 0; border-left-width: 0;
     opacity: 0; visibility: hidden; overflow: hidden;
     transition: opacity 0.12s ease-out, visibility 0s linear 0.12s;
   }
@@ -203,7 +216,7 @@ body.ex-has-nav #ex-nav {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  body.ex-has-nav .ex-layout, body.ex-has-nav #ex-nav,
+  .ex-layout, body.ex-has-nav #ex-nav, #ex-sidebar,
   .ex-nav-backdrop { transition: none; }
 }
 .ex-nav-head {
@@ -259,7 +272,7 @@ body.ex-has-nav #ex-nav {
 .ex-nav-twisty:hover { color: var(--ex-fg); }
 .ex-nav-twisty.ex-nav-expanded { transform: rotate(90deg); }
 .ex-nav-twisty.ex-nav-leaf { cursor: default; }
-/* sidebar collapse control, lives at the head of the breadcrumb bar */
+/* left-nav collapse control, lives at the head of the breadcrumb bar */
 .ex-nav-toggle {
   flex: none; margin-right: 0.2rem;
   border: none; background: none; color: var(--ex-faint);
@@ -268,6 +281,25 @@ body.ex-has-nav #ex-nav {
   transition: color 0.12s ease-out, background 0.12s ease-out;
 }
 .ex-nav-toggle:hover { color: var(--ex-fg); background: var(--ex-line); }
+/* the conversation panel's twin, pinned at the far right of the same bar.
+   Desktop only: below 961px that panel is a drawer with its own floating
+   button, and two controls for one drawer is one too many. */
+.ex-side-toggle {
+  display: none; flex: none; margin-left: 0.1rem;
+  align-items: center; gap: 0.3rem;
+  border: none; background: none; color: var(--ex-faint);
+  font-size: 0.9rem; line-height: 1; padding: 0.15rem 0.35rem;
+  border-radius: 6px; cursor: pointer;
+  transition: color 0.12s ease-out, background 0.12s ease-out;
+}
+.ex-side-toggle:hover { color: var(--ex-fg); background: var(--ex-line); }
+@media (min-width: 961px) { .ex-side-toggle { display: inline-flex; } }
+/* rides the toggle only while the panel is collapsed — see renderSideToggle */
+.ex-side-count {
+  background: var(--ex-accent); color: #fff; border-radius: 999px;
+  font-size: 0.66rem; font-weight: 700; padding: 0 0.4rem;
+  min-width: 1.05rem; text-align: center;
+}
 
 /* ---- document typography ---- */
 #explain-content h1 {
@@ -807,7 +839,7 @@ body.ex-index h1 { font-size: 1.5rem; font-weight: 650; letter-spacing: -0.025em
 }
 
 #ex-versions {
-  position: fixed; inset: 0 360px 0 0; z-index: 39;
+  position: fixed; inset: 0 var(--ex-side-w) 0 0; z-index: 39;
   background: var(--ex-bg); overflow-y: auto;
   /* the document is still scrolled behind this; don't hand it the wheel when
      the overlay reaches its end */
