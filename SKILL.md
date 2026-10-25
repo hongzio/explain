@@ -190,37 +190,148 @@ without notes. Long boilerplate goes in `<details>` (give its `<pre>` a
 `data-src` too so it is verified).
 
 **Diagrams** — hand-authored inline `<svg>` inside
-`<figure class="diagram">…<figcaption>`: architecture boxes-and-arrows,
-flows, sequences, state machines. Use `viewBox` (no fixed width), theme
-tokens for colors (`var(--ex-fg)`, `var(--ex-muted)`, `var(--ex-line)`,
-`var(--ex-accent)`; fills with `var(--ex-surface)` or `var(--ex-panel)`,
-raised elements with `var(--ex-elevated)`), `font-size` ≥ 12, short
-labels. A diagram must show real structure from the code, not decoration —
-and its nodes link to deeper views whenever those exist. Scope rules:
-≤ 12 nodes per diagram (split or drill down instead), top-down layout for
-wide trees, left-to-right for deep chains, and prefer a **task-scoped
-trace** (one flow, its actual call path) over a whole-repo map — whole-repo
-graphs overwhelm and mislead.
+`<figure class="diagram" data-asks="…">…<figcaption>`: architecture
+boxes-and-arrows, flows, sequences, state machines. `data-asks` is the
+question the drawing answers, in the reader's words; it renders above the
+figure and is the test of whether the figure earns its place. Use `viewBox`
+(no fixed width), theme tokens for colors (`var(--ex-fg)`, `var(--ex-muted)`,
+`var(--ex-line)`, `var(--ex-accent)`; fills with `var(--ex-surface)` or
+`var(--ex-panel)`, raised elements with `var(--ex-elevated)`), `font-size`
+≥ 12, short labels. A diagram must show real structure from the code, not
+decoration. Prefer a **task-scoped trace** (one flow, its actual call path)
+over a whole-repo map — whole-repo graphs overwhelm and mislead; top-down
+layout for wide trees, left-to-right for deep chains.
 
-**Toolbox summary**: views + breadcrumbs + hierarchy sidebar + search, clickable
-SVG/cards, `.ex-steps`,
-`.ex-walkthrough`, `<details>`, tables. These are plain HTML conventions
-that `assets/explain.js` enhances — write no `<script>` of your own, and no
-external URLs, images, or fonts (only the `/assets/…` references already in
-the template).
+**Annotate the nodes; don't caption them from a distance.** Mark every
+meaningful node `class="ex-node" data-node="id"`, give it `data-ref="path:line"`
+for the code it stands for and `data-goto="viewid"` where a deeper view
+exists, and write its note as a row of the figure's legend:
+
+```html
+<figure class="diagram" data-asks="How does a comment reach the agent?">
+  <svg viewBox="0 0 440 120">
+    <g class="ex-node" data-node="watch" data-ref="scripts/watch.py:88" data-goto="watch">
+      <rect x="10" y="30" width="120" height="44" rx="8"
+            fill="var(--ex-surface)" stroke="var(--ex-line-strong)"/>
+      <text x="70" y="57" text-anchor="middle" font-size="13" fill="var(--ex-fg)">watch.py</text>
+    </g>
+  </svg>
+  <figcaption>A comment reaches the session through a file watcher, not the server.
+    <ol class="ex-legend">
+      <li data-for="watch">Polls the document's comments and wakes the session
+      that owns it — scripts/watch.py:88.</li>
+    </ol>
+  </figcaption>
+</figure>
+```
+
+Hovering or tab-focusing a node raises its legend row over the node itself
+and lights the row. The note stays in the document, so it is searchable,
+quotable and readable with JS off — a note written into an attribute is
+invisible to both search and comments, so don't. Every `.ex-node` needs a
+legend row and every legend row needs a node; the validator checks both ways.
+
+**Layer a diagram instead of shrinking it.** Up to 12 nodes, draw one
+figure. Past that, split the drawing into cumulative layers and let the
+reader add them a press at a time:
+
+```html
+<figure class="diagram" data-asks="How does a document get served?" data-layers>
+  <svg viewBox="0 0 520 200">
+    <g data-layer="0">…the skeleton: the boxes the answer cannot do without…</g>
+    <g data-layer="1" data-layer-label="Freshness check">…</g>
+    <g data-layer="2" data-layer-label="Version snapshot">…</g>
+  </svg>
+  <figcaption>…</figcaption>
+</figure>
+```
+
+Layer 0 is what shows on load and must answer the view's headline on its own
+— layering paces the detail, it never hides the point. Indices run 0..n with
+no gaps, every layer past 0 carries a `data-layer-label`, each layer adds
+≤ 6 nodes, and the whole figure stays ≤ 24. Nothing animates: the reader's
+own pacing is the mechanism; motion is not, and for a reader meeting this
+code for the first time it costs more than it gives.
+
+**Predict then reveal (`.ex-predict`)** — at the two or three points where a
+reader's reasonable guess is WRONG, ask before you tell:
+
+```html
+<div class="ex-predict">
+  <p class="ex-ask">Two sessions have the same document open. Which one answers
+  a new comment?</p>
+  <ul class="ex-choices">
+    <li>Both — each session sees the comment
+      <span class="ex-why">Both do see it, but the watcher checks ownership
+      first, so only one of them replies.</span></li>
+    <li data-correct>Whichever session took the watch over last
+      <span class="ex-why">Ownership is a claim the newest watcher writes —
+      scripts/watch.py:120.</span></li>
+  </ul>
+  <div class="ex-reveal">
+    <p>…the answer, with the excerpt that proves it…</p>
+  </div>
+</div>
+```
+
+This is the component that is easiest to overuse, so:
+
+- **Two or three per document, never more.** The gain is specific to the
+  question asked — asking buys nothing for the material you didn't ask
+  about, so one question at a real misconception beats five on easy facts.
+- **Every choice answers back** (`.ex-why`, on the correct one too). A guess
+  with nothing said back teaches nothing.
+- **Never a view's lead element.** The view's point comes first and the
+  question deepens it; the validator rejects a view that opens with one.
+- The reader can always press straight past it, so never write prose that
+  assumes they answered.
+
+**Before/after contrast (`.ex-contrast`)** — for diff documents: the two
+states side by side with ONE difference between the panes, and a note saying
+what that difference means. A sequential before-then-after loses the
+comparison that makes the change legible.
+
+```html
+<div class="ex-contrast">
+  <div class="ex-side" data-label="Before">
+    <pre data-src="scripts/watch.py" data-rev="HEAD~1">…</pre>
+  </div>
+  <div class="ex-side" data-label="After">
+    <pre data-src="scripts/watch.py">…</pre>
+  </div>
+  <div class="ex-note">The watcher now claims the document before replying, so
+  a second session stops answering the same comment.</div>
+</div>
+```
+
+`data-rev` is a git revision: the validator verifies that pane's excerpt with
+`git show <rev>:<path>`, which is what holds "before" code to the same
+verbatim standard as working-tree code. Both panes come first, the note last.
+
+**Toolbox summary**: views + breadcrumbs + hierarchy sidebar + search,
+annotated and layered SVG diagrams, clickable cards, `.ex-steps`,
+`.ex-walkthrough`, `.ex-predict`, `.ex-contrast`, `<details>`, tables. These
+are plain HTML conventions that `assets/explain.js` enhances — write no
+`<script>` of your own, and no external URLs, images, or fonts (only the
+`/assets/…` references already in the template).
 
 ### Quality gates
 
 Before authoring, commit to a one-paragraph plan: the view tree (ids,
 titles, parents), the ONE worked example you will trace through the whole
-document, and a diagram inventory (each diagram: what real structure it
-shows, which views its nodes link to). Then author against it.
+document, a diagram inventory (each diagram: the question it answers, what
+real structure it shows, which views its nodes drill into, and its layers if
+it needs them), and the two or three places you will ask before telling —
+naming, for each, the wrong answer a reasonable reader would give. Then
+author against it. The inventory is where a decorative diagram gets caught:
+if you cannot write the question a figure answers, it has none.
 
 Anti-patterns — if the document matches one of these, it is wrong:
 
 - A stepper for non-sequential content (alternatives, comparisons → cards
   or a table; steppers are only for one thing transforming over time).
-- A whole-repo architecture graph, or any diagram over ~12 nodes.
+- A whole-repo architecture graph; any unlayered diagram over 12 nodes, or
+  a layered one over 24.
 - A code block with no walkthrough notes (outside `<details>` boilerplate).
 - Prose that would be true of any codebase — no real identifiers, paths,
   or values in a paragraph is the tell.
@@ -229,12 +340,23 @@ Anti-patterns — if the document matches one of these, it is wrong:
   answer no question.
 - A view whose main point is buried behind an interaction: each view leads
   with its diagram/example/claim; interactions deepen and drill, they don't
-  hide the headline.
+  hide the headline. Layer 0 and the text around a prediction are the two
+  places this goes wrong.
+- A metaphor or analogy drawing — a pipeline as plumbing, a queue as a
+  conveyor belt. Readers skip them as unserious and go back to the code;
+  draw the structure the code actually has instead.
+- Anything that moves on its own: animated transitions, auto-advancing
+  steppers or layers. The reader sets the pace.
+- A prediction in every section, or one the reader cannot skip; a diagram
+  node whose note is an attribute rather than a legend row.
 
 After serving, do a render inspection: open the page (browser tooling if
 available — check each view for overflow, collisions, dead space, unreadable
-diagram labels; fix and refresh). The validator checks the computable parts;
-only eyes catch layout.
+diagram labels; fix and refresh). Exercise the interactions too: hover a
+diagram node and check the note lands over the drawing rather than off its
+edge, step a layered figure from 0 to the end, and answer one prediction
+wrongly to see that the feedback reads as an answer. The validator checks the
+computable parts; only eyes catch layout.
 
 ## 3. Serve and open
 

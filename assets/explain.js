@@ -91,6 +91,9 @@
       searchCountOne: '1 match',
       searchMore: '{n} more not shown',
       searchStale: 'The document changed — search again.',
+      layerBase: 'Base',
+      layerAll: 'All layers',
+      predictSkip: 'Just show me',
     },
     ko: {
       panelTitle: '대화',
@@ -164,6 +167,9 @@
       searchCountOne: '1건',
       searchMore: '외 {n}건 더',
       searchStale: '문서가 바뀌었습니다 — 다시 검색하세요.',
+      layerBase: '기본',
+      layerAll: '전체 보기',
+      predictSkip: '그냥 보기',
     },
   };
   const S = STRINGS[CFG.lang] || STRINGS.en;
@@ -599,9 +605,187 @@
     });
   }
 
+  // ---------- diagram annotations (.ex-node + .ex-legend) ----------
+
+  /* A node's note is authored as <li data-for="id"> in the figure's .ex-legend.
+   * This raises a copy of that row over the node on hover or focus and lights
+   * the row itself. The <li> is left where it is on purpose: it is how the
+   * diagram reads with JS off, and both the anchor and search indexes need it
+   * in the document. Reading a note three inches below the box it describes is
+   * what the popover exists to avoid. */
+  function setupDiagrams() {
+    for (const fig of content.querySelectorAll('figure.diagram')) {
+      const notes = new Map();
+      for (const li of fig.querySelectorAll('.ex-legend > li[data-for]')) notes.set(li.dataset.for, li);
+      const nodes = Array.from(fig.querySelectorAll('.ex-node'));
+      if (!nodes.length) continue;
+      let pop = null;
+      const hide = () => {
+        if (pop) { pop.remove(); pop = null; }
+        for (const n of nodes) n.classList.remove('ex-node-on');
+        for (const li of notes.values()) li.classList.remove('ex-legend-on');
+      };
+      for (const node of nodes) {
+        const li = notes.get(node.dataset.node || '');
+        const ref = (node.dataset.ref || '').trim();
+        const dest = node.dataset.goto || '';
+        if (li || ref || dest) {
+          node.classList.add('ex-node-live');
+          node.setAttribute('tabindex', '0');
+          if (!node.hasAttribute('role')) node.setAttribute('role', dest ? 'link' : 'note');
+        }
+        const show = () => {
+          hide();
+          node.classList.add('ex-node-on');
+          if (li) li.classList.add('ex-legend-on');
+          if (!li && !ref) return;
+          pop = document.createElement('div');
+          pop.className = 'ex-note-pop ex-ui';
+          // the <li> is cloned as text, not moved: a comment highlight painted
+          // on the original row must not travel into transient chrome
+          pop.textContent = li ? li.textContent.trim() : '';
+          if (ref) {
+            const code = document.createElement('code');
+            code.textContent = ref;
+            pop.appendChild(code);
+          }
+          fig.appendChild(pop);
+          placeNotePop(fig, node, pop);
+        };
+        node.addEventListener('mouseenter', show);
+        node.addEventListener('focus', show);
+        node.addEventListener('mouseleave', hide);
+        node.addEventListener('blur', hide);
+        node.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          if (!dest || !views.has(dest)) return;
+          e.preventDefault();
+          location.hash = '#/' + encodeURIComponent(dest);
+        });
+      }
+      fig.addEventListener('mouseleave', hide);
+    }
+  }
+
+  /* Under the node when there is room below it, above it otherwise, and never
+   * past the figure's own edges. */
+  function placeNotePop(fig, node, pop) {
+    const fr = fig.getBoundingClientRect();
+    const nr = node.getBoundingClientRect();
+    const pw = pop.offsetWidth;
+    const ph = pop.offsetHeight;
+    let left = nr.left - fr.left + nr.width / 2 - pw / 2;
+    left = Math.max(4, Math.min(left, Math.max(4, fr.width - pw - 4)));
+    let top = nr.bottom - fr.top + 8;
+    if (top + ph > fr.height) {
+      const above = nr.top - fr.top - ph - 8;
+      top = above >= 0 ? above : Math.max(0, fr.height - ph);
+    }
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+  }
+
+  // ---------- layered diagram (figure.diagram[data-layers]) ----------
+
+  /* Reader-paced segmenting. Layer 0 is the skeleton that stands on its own —
+   * the view's headline is never behind a press — and each layer after it goes
+   * on top, cumulatively. No transition on the reveal: for someone meeting
+   * this code for the first time, motion buys nothing the pacing does not. */
+  function setupLayers() {
+    for (const fig of content.querySelectorAll('figure.diagram[data-layers]')) {
+      const groups = Array.from(fig.querySelectorAll('[data-layer]'))
+        .sort((a, b) => Number(a.dataset.layer) - Number(b.dataset.layer));
+      if (groups.length < 2) continue;
+      const bar = document.createElement('div');
+      bar.className = 'ex-layer-bar ex-ui';
+      const tabs = groups.map((g, i) => {
+        const b = document.createElement('button');
+        b.className = 'ex-step-tab';
+        b.textContent = g.dataset.layerLabel || (i === 0 ? S.layerBase : String(i));
+        b.addEventListener('click', () => showLayers(fig, i));
+        bar.appendChild(b);
+        return b;
+      });
+      const all = document.createElement('button');
+      all.className = 'ex-step-tab ex-layer-all';
+      all.textContent = S.layerAll;
+      all.addEventListener('click', () => showLayers(fig, groups.length - 1));
+      bar.appendChild(all);
+      fig._layers = groups;
+      fig._layerTabs = tabs;
+      fig.prepend(bar);
+      showLayers(fig, 0);
+    }
+  }
+
+  /* Cumulative: layer n means 0..n are drawn. */
+  function showLayers(fig, n) {
+    if (!fig._layers) return;
+    fig._layers.forEach((g, i) => {
+      g.classList.toggle('ex-layer-off', i > n);
+      if (fig._layerTabs[i]) fig._layerTabs[i].classList.toggle('ex-step-tab-active', i === n);
+    });
+  }
+
+  // ---------- predict then reveal (.ex-predict) ----------
+
+  /* Guessing before reading is what makes an answer stick — but only for the
+   * question actually asked, and only when the guess gets an answer back. So
+   * every choice carries its own .ex-why, authored as a child element rather
+   * than an attribute so it is indexed and commentable like the rest of the
+   * document, and the way out is always on screen: effort that is compulsory
+   * is met with avoidance, not attention. */
+  function setupPredict() {
+    for (const box of content.querySelectorAll('.ex-predict')) {
+      const list = box.querySelector('.ex-choices');
+      if (list) {
+        list.classList.add('ex-choices-live');
+        for (const li of list.querySelectorAll(':scope > li')) {
+          li.setAttribute('role', 'button');
+          li.setAttribute('tabindex', '0');
+          li.addEventListener('click', () => answerPredict(box, li));
+          li.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            e.preventDefault();
+            answerPredict(box, li);
+          });
+        }
+      }
+      const bar = document.createElement('div');
+      bar.className = 'ex-predict-bar ex-ui';
+      const skip = document.createElement('button');
+      skip.className = 'ex-step-tab ex-predict-skip';
+      skip.textContent = S.predictSkip;
+      skip.addEventListener('click', () => answerPredict(box, null));
+      bar.appendChild(skip);
+      (list || box.querySelector('.ex-ask') || box).after(bar);
+    }
+  }
+
+  /* One-way: the feedback and the walkthrough stay open once they are open.
+   * Nothing is re-indexed here — hidden .ex-why/.ex-reveal text is already in
+   * the anchor and search indexes, so a comment left on the revealed answer
+   * survives the reader collapsing nothing and the document being reloaded. */
+  function answerPredict(box, picked) {
+    if (box.classList.contains('ex-predict-done')) return;
+    if (picked) picked.classList.add('ex-choice-picked');
+    box.classList.add('ex-predict-done');
+    const list = box.querySelector('.ex-choices');
+    if (list) {
+      list.classList.remove('ex-choices-live');
+      for (const li of list.querySelectorAll(':scope > li')) {
+        li.removeAttribute('role');
+        li.removeAttribute('tabindex');
+      }
+    }
+    const bar = box.querySelector('.ex-predict-bar');
+    if (bar) bar.remove();
+  }
+
   /* Make a node visible: switch to its view, open ancestor <details>,
-   * activate its step — outermost first. Used when opening a comment
-   * thread whose anchor sits inside collapsed/hidden content. */
+   * activate its step, reveal its prediction's answer, draw its diagram layer
+   * — outermost first. Used when opening a comment thread, or walking to a
+   * search hit, whose anchor sits inside collapsed or hidden content. */
   function revealForNode(node) {
     const actions = [];
     let el = node.nodeType === 1 ? node : node.parentElement;
@@ -609,6 +793,22 @@
       const cur = el;
       if (cur.tagName === 'DETAILS') actions.push(() => { cur.open = true; });
       if (cur.classList.contains('ex-step')) actions.push(() => activateStep(cur));
+      // only the folded halves count: landing on the question itself must not
+      // give the answer away to a reader who has not guessed yet
+      if (cur.classList.contains('ex-reveal') || cur.classList.contains('ex-why')) {
+        const box = cur.closest('.ex-predict');
+        if (box) actions.push(() => answerPredict(box, null));
+      }
+      if (cur.dataset.layer !== undefined) {
+        const fig = cur.closest('figure.diagram');
+        actions.push(() => {
+          if (!fig || !fig._layers) return;
+          const i = fig._layers.indexOf(cur);
+          // only when it is actually hidden — otherwise walking into layer 1
+          // of a diagram the reader has fully expanded would re-collapse it
+          if (i >= 0 && cur.classList.contains('ex-layer-off')) showLayers(fig, i);
+        });
+      }
       if (cur.dataset.view) {
         actions.push(() => {
           if (activeView !== cur.dataset.view) {
@@ -1737,6 +1937,9 @@
 
     setupViews();
     setupSteps();
+    setupDiagrams();
+    setupLayers();
+    setupPredict();
     setupVersions();
     versionSeen = storedSeen();
     // one router for view ids and version routes alike, wired here rather

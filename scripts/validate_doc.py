@@ -16,6 +16,14 @@ Structure:
       currentColor, none, transparent or inherit — no raw hex/rgb/named
   E7  self-contained: no <script>, no external src/href assets
   E8  doc.json exists with title/kind/target/lang/created_at/updated_at
+  E12 every .ex-node has data-node and a matching .ex-legend <li data-for>
+  E13 figure.diagram[data-layers]: >=2 [data-layer] groups, indices 0..n with
+      no gaps, a data-layer-label on every layer past 0, none orphaned
+  E14 every .ex-predict has .ex-ask, >=2 .ex-choices <li>, exactly one
+      [data-correct], a non-empty .ex-why per choice, and an .ex-reveal
+  E15 no view opens with a .ex-predict (lead with the point, ask afterwards)
+  E17 every .ex-contrast has exactly two labelled .ex-side panes, in front,
+      and a non-empty .ex-note saying what the one difference means
 
 Evidence (needs the project root — inferred when the doc lives in
 <project>/.explain/<slug>, else pass --project; skipped with a note when
@@ -25,6 +33,9 @@ unavailable):
   E11 code excerpts under a data-src element appear VERBATIM (contiguous,
       whitespace-insensitive) in that file; file:line citations in prose
       point at existing files and in-range lines
+  E16 an excerpt marked data-rev="<rev>" appears verbatim in that file as of
+      that git revision — how a diff doc's 'before' pane is held to the same
+      standard as its 'after'
 
 Warnings:
   W1  a view's text is very long (consider splitting / more structure)
@@ -33,6 +44,13 @@ Warnings:
   W4  a doc.json sources hash no longer matches the file (doc may be stale)
   W5  diff-kind doc without coverage info in doc.json
   W6  a file:line citation resolved only by basename search (ambiguous path)
+  W7  figure.diagram without data-asks (the question the drawing answers)
+  W8  a diagram whose nodes neither cite code nor drill down (decoration?)
+  W9  more than 3 .ex-predict blocks in one document
+  W10 a diagram over the node ceiling: 12 plain, or 6 added per layer / 24
+      in total when it is layered
+  W11 an .ex-legend row naming no node
+  W12 a data-rev excerpt left unchecked because git is unavailable
 
 Exit 0 = no errors (warnings allowed), 1 = errors. stdlib only, Python 3.11+.
 """
@@ -40,6 +58,7 @@ Exit 0 = no errors (warnings allowed), 1 = errors. stdlib only, Python 3.11+.
 import hashlib
 import json
 import re
+import subprocess
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
@@ -250,6 +269,132 @@ def main() -> int:
                 else:
                     errors.append(f"E7: external asset <{n.tag} {attr}=\"{val[:60]}\">")
 
+    # E12 / W11: diagram node notes live in the figure's .ex-legend
+    legend_rows: list[tuple[str, Node]] = []
+    for n in content.walk():
+        if n.tag == "li" and n.parent is not None and "ex-legend" in n.parent.cls():
+            legend_rows.append(((n.attrs.get("data-for") or "").strip(), n))
+    claimed: set[str] = set()
+    for n in content.walk():
+        if "ex-node" not in n.cls():
+            continue
+        node_id = (n.attrs.get("data-node") or "").strip()
+        if not node_id:
+            errors.append('E12: .ex-node without data-node="id"')
+            continue
+        claimed.add(node_id)
+        fig = n.ancestor(lambda a: a.tag == "figure" and "diagram" in a.cls())
+        rows = [r for fid, r in legend_rows if fid == node_id and (fig is None or r.ancestor(lambda a: a is fig))]
+        if not rows:
+            errors.append(f"E12: .ex-node data-node='{node_id}' has no .ex-legend <li data-for=\"{node_id}\">")
+        elif not rows[0].all_text().strip():
+            errors.append(f"E12: the legend note for '{node_id}' is empty")
+    for fid, _row in legend_rows:
+        if not fid:
+            warns.append("W11: .ex-legend <li> without data-for — it names no node")
+        elif fid not in claimed:
+            warns.append(f"W11: .ex-legend row for '{fid}' matches no .ex-node")
+
+    # E13: diagram layers
+    for n in content.walk():
+        if not (n.tag == "figure" and "diagram" in n.cls() and "data-layers" in n.attrs):
+            continue
+        groups = [m for m in n.walk() if m.attrs.get("data-layer") is not None]
+        idx: list[int] = []
+        for g in groups:
+            raw = (g.attrs.get("data-layer") or "").strip()
+            if not raw.isdigit():
+                errors.append(f"E13: data-layer='{raw}' is not a layer index")
+                continue
+            idx.append(int(raw))
+            if int(raw) > 0 and not (g.attrs.get("data-layer-label") or "").strip():
+                errors.append(f"E13: layer {raw} has no data-layer-label — the bar would label it with a bare number")
+        if len(groups) < 2:
+            errors.append("E13: figure.diagram[data-layers] needs at least two [data-layer] groups")
+        elif sorted(idx) != list(range(len(idx))):
+            errors.append(f"E13: layer indices must run 0..n with no gaps or repeats, got {sorted(idx)}")
+    for n in content.walk():
+        if n.attrs.get("data-layer") is None:
+            continue
+        if n.ancestor(lambda a: a.tag == "figure" and "data-layers" in a.attrs) is None:
+            errors.append("E13: [data-layer] outside figure.diagram[data-layers] — nothing would ever reveal it")
+
+    # E14 / E15 / W9: predictions
+    predicts = [n for n in content.walk() if "ex-predict" in n.cls()]
+    for n in predicts:
+        ask = next((c for c in n.walk() if "ex-ask" in c.cls()), None)
+        if ask is None or not ask.all_text().strip():
+            errors.append("E14: .ex-predict without a non-empty .ex-ask")
+        box = next((c for c in n.walk() if "ex-choices" in c.cls()), None)
+        lis = [c for c in box.children if c.tag == "li"] if box is not None else []
+        if len(lis) < 2:
+            errors.append("E14: .ex-predict needs an .ex-choices list of at least two <li>")
+        correct = [c for c in lis if "data-correct" in c.attrs]
+        if lis and len(correct) != 1:
+            errors.append(f"E14: .ex-predict needs exactly one <li data-correct>, found {len(correct)}")
+        for c in lis:
+            why = next((d for d in c.walk() if "ex-why" in d.cls()), None)
+            if why is None or not why.all_text().strip():
+                errors.append("E14: an .ex-choices <li> has no non-empty .ex-why — a guess with nothing said back teaches nothing")
+        if not any("ex-reveal" in c.cls() for c in n.walk()):
+            errors.append("E14: .ex-predict without an .ex-reveal")
+    for vid, v in views.items():
+        lead = next((c for c in v.children if c.tag not in ("h1", "h2", "h3")), None)
+        if lead is not None and "ex-predict" in lead.cls():
+            errors.append(f"E15: view '{vid}' opens with a .ex-predict — lead with the point, ask afterwards")
+    if len(predicts) > 3:
+        warns.append(
+            f"W9: {len(predicts)} .ex-predict blocks — the gain is specific to what you ask, "
+            "so 2-3 questions at the real misconceptions beat a quiz"
+        )
+
+    # E17: before/after contrast
+    for n in content.walk():
+        if "ex-contrast" not in n.cls():
+            continue
+        sides = [c for c in n.children if "ex-side" in c.cls()]
+        if len(sides) != 2:
+            errors.append(f"E17: .ex-contrast needs exactly two .ex-side panes, found {len(sides)}")
+        if n.children[:2] != sides[:2]:
+            errors.append("E17: the two .ex-side panes must come first in .ex-contrast (the note follows them)")
+        for side in sides:
+            if not (side.attrs.get("data-label") or "").strip():
+                errors.append('E17: .ex-side without data-label="…" — the panes would be unlabelled')
+        note = next((c for c in n.children if "ex-note" in c.cls()), None)
+        if note is None or not note.all_text().strip():
+            errors.append("E17: .ex-contrast without a non-empty .ex-note saying what the one difference means")
+
+    # W7 / W8 / W10: diagram upkeep
+    for n in content.walk():
+        if not (n.tag == "figure" and "diagram" in n.cls()):
+            continue
+        if not (n.attrs.get("data-asks") or "").strip():
+            warns.append("W7: figure.diagram without data-asks — name the question the drawing answers")
+        cites = any((m.attrs.get("data-ref") or "").strip() for m in n.walk())
+        drills = any(
+            (m.attrs.get("data-goto") or "").strip()
+            or (m.tag == "a" and (m.attrs.get("href") or "").startswith("#/"))
+            for m in n.walk()
+        )
+        if not cites and not drills:
+            warns.append("W8: figure.diagram whose nodes neither cite code (data-ref) nor drill down — decoration?")
+        nodes = [m for m in n.walk() if "ex-node" in m.cls()]
+        if "data-layers" in n.attrs:
+            # cumulative reveal: the last layer has everything on screen, so what
+            # each layer must keep small is its INCREMENT, and the figure its total
+            per: dict[str, int] = {}
+            for m in nodes:
+                g = m.ancestor(lambda a: a.attrs.get("data-layer") is not None)
+                per.setdefault((g.attrs.get("data-layer") or "?") if g is not None else "?", 0)
+                per[(g.attrs.get("data-layer") or "?") if g is not None else "?"] += 1
+            for key, count in sorted(per.items()):
+                if count > 6:
+                    warns.append(f"W10: layer {key} adds {count} nodes at once — 6 per step is the ceiling")
+            if len(nodes) > 24:
+                warns.append(f"W10: layered figure.diagram totals {len(nodes)} nodes — 24 is the ceiling")
+        elif len(nodes) > 12:
+            warns.append(f"W10: figure.diagram has {len(nodes)} .ex-node — split it or give it layers (12 is the ceiling)")
+
     # E8 / W3: doc.json
     meta = {}
     meta_path = doc_dir / "doc.json"
@@ -279,6 +424,8 @@ def main() -> int:
                 lambda a: a.tag == "details"
                 or "ex-walkthrough" in a.cls()
                 or "ex-steps" in a.cls()
+                # a contrast carries one note for the pair (E17), not one per pane
+                or "ex-contrast" in a.cls()
             )
             if sheltered is None:
                 warns.append("W2: <pre> outside .ex-walkthrough/.ex-steps/<details> — where are its notes?")
@@ -302,6 +449,38 @@ def main() -> int:
                     src_cache[rel] = None
             return src_cache[rel]
 
+        rev_cache: dict[tuple[str, str], list[str] | None] = {}
+        git_ok: bool | None = None
+
+        def have_git() -> bool:
+            nonlocal git_ok
+            if git_ok is None:
+                try:
+                    r = subprocess.run(
+                        ["git", "-C", str(project), "rev-parse", "--git-dir"],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    git_ok = r.returncode == 0
+                except (OSError, subprocess.SubprocessError):
+                    git_ok = False
+            return git_ok
+
+        def load_rev(rev: str, rel: str) -> list[str] | None:
+            """The file as of a git revision. This is what holds a diff doc's
+            'before' pane to the same verbatim standard as its 'after' — the
+            working tree cannot vouch for code that is no longer in it."""
+            key = (rev, rel)
+            if key not in rev_cache:
+                try:
+                    r = subprocess.run(
+                        ["git", "-C", str(project), "show", f"{rev}:{rel}"],
+                        capture_output=True, text=True, timeout=20,
+                    )
+                    rev_cache[key] = r.stdout.splitlines() if r.returncode == 0 else None
+                except (OSError, subprocess.SubprocessError):
+                    rev_cache[key] = None
+            return rev_cache[key]
+
         for n in content.walk():
             if n.tag != "pre":
                 continue
@@ -309,14 +488,27 @@ def main() -> int:
             if carrier is None:
                 continue
             rel = carrier.attrs["data-src"].strip()
+            rev_at = n if n.attrs.get("data-rev") else n.ancestor(lambda a: bool(a.attrs.get("data-rev")))
+            rev = rev_at.attrs["data-rev"].strip() if rev_at is not None else ""
+            excerpt = n.all_text()
+            head = stripped_lines(excerpt)[:1]
+            where = head[0][:50] if head else "?"
+            if rev:
+                if not have_git():
+                    warns.append(f"W12: data-rev '{rev}' unchecked — {project} is not a git repo (or git is unavailable)")
+                    continue
+                lines = load_rev(rev, rel)
+                if lines is None:
+                    errors.append(f"E16: data-rev '{rev}' has no '{rel}' (git show {rev}:{rel} failed)")
+                elif not excerpt_in_file(excerpt, lines):
+                    errors.append(f"E16: excerpt not found verbatim in '{rel}' at '{rev}' (starts: {where})")
+                continue
             lines = load_src(rel)
             if lines is None:
                 errors.append(f"E10: data-src '{rel}' not found under {project}")
                 continue
-            excerpt = n.all_text()
             if not excerpt_in_file(excerpt, lines):
-                head = stripped_lines(excerpt)[:1]
-                errors.append(f"E11: excerpt not found verbatim in '{rel}' (starts: {head[0][:50] if head else '?'})")
+                errors.append(f"E11: excerpt not found verbatim in '{rel}' (starts: {where})")
 
         # E11/W6: file:line citations in prose (outside pre/code)
         def prose_text(node: Node) -> str:

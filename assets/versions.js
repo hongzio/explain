@@ -111,16 +111,24 @@ function codeText(el) {
     .replace(/^\n+|\n+$/g, '');
 }
 
-/* A diagram's meaning is carried by its labels and the views its nodes link
- * to. Its coordinates are not meaning — they move whenever the document is
- * regenerated. So `key` decides whether it CHANGED and `deep` only decides
- * whether to mention that the drawing was redrawn. */
+/* A diagram's meaning is carried by its labels, the views its nodes link to
+ * and the code they cite. Its coordinates are not meaning — they move whenever
+ * the document is regenerated. So `key` decides whether it CHANGED and `deep`
+ * only decides whether to mention that the drawing was redrawn. */
 function figureKey(el) {
   const labels = Array.from(el.querySelectorAll('text, title, figcaption'))
     .map((n) => norm(n.textContent))
     .filter(Boolean);
-  const links = Array.from(el.querySelectorAll('a[href]')).map((a) => a.getAttribute('href'));
-  return JSON.stringify([labels, links]);
+  // a node drills down by href OR data-goto, and cites code by data-ref;
+  // all three move the reader somewhere, so all three are meaning
+  const links = Array.from(el.querySelectorAll('a[href], [data-goto], [data-ref]'))
+    .map((n) => [n.getAttribute('href'), n.getAttribute('data-goto'), n.getAttribute('data-ref')]);
+  // the labels that live in attributes rather than in text: the question the
+  // figure answers, and the name of each layer
+  const attrs = [el.getAttribute('data-asks')].concat(
+    Array.from(el.querySelectorAll('[data-layer-label]')).map((n) => n.getAttribute('data-layer-label')),
+  );
+  return JSON.stringify([labels, links, attrs]);
 }
 
 function blockInfo(el) {

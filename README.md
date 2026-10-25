@@ -1,8 +1,9 @@
 # explain
 
 An agent skill (Claude Code & Codex) that turns "explain this diff / module /
-repo" into a visual HTML document — inline SVG diagrams, interactive sections —
-served on localhost, with a live conversation loop: select text to comment on
+repo" into a visual HTML document — SVG diagrams whose nodes carry their own
+note and link to the code, diagrams that build a layer at a time, worked
+examples, annotated code walkthroughs — served on localhost, with a live conversation loop: select text to comment on
 it, or start a thread from the sidebar without selecting anything, and the
 agent session watching the document replies in near real time (and may fix the
 document itself).
